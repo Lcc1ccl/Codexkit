@@ -3,6 +3,7 @@ import Foundation
 @MainActor
 final class CLIProxyAPIRuntimeController: LifecycleControlling {
     static let shared = CLIProxyAPIRuntimeController()
+    private nonisolated static let skipRuntimeEnvironmentKey = "CODEXKIT_SKIP_CLIPROXYAPI_RUNTIME"
     private nonisolated static let startupHealthCheckAttempts = 8
     private nonisolated static let startupHealthCheckRetryDelayNanoseconds: UInt64 = 250_000_000
 
@@ -66,6 +67,16 @@ final class CLIProxyAPIRuntimeController: LifecycleControlling {
             maxRetryInterval: settings.maxRetryInterval,
             disableCooling: settings.disableCooling
         )
+        if Self.shouldSkipRuntimeLaunch() {
+            self.monitorTask?.cancel()
+            self.monitorTask = nil
+            self.quotaRefreshTask?.cancel()
+            self.quotaRefreshTask = nil
+            self.process = nil
+            self.appliedSettings = settings
+            self.updateState(status: .stopped, lastError: nil, pid: nil, config: nextConfig)
+            return
+        }
         if Self.shouldRestartProcess(
             isRunning: self.process?.isRunning == true,
             appliedSettings: self.appliedSettings,
@@ -516,6 +527,24 @@ final class CLIProxyAPIRuntimeController: LifecycleControlling {
             return "CLIProxyAPI exited with status \(process.terminationStatus)"
         @unknown default:
             return "CLIProxyAPI terminated unexpectedly"
+        }
+    }
+
+    private static func shouldSkipRuntimeLaunch(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        guard let rawValue = environment[self.skipRuntimeEnvironmentKey]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+            rawValue.isEmpty == false else {
+            return false
+        }
+
+        switch rawValue {
+        case "1", "true", "yes", "on":
+            return true
+        default:
+            return false
         }
     }
 }

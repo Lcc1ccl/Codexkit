@@ -34,6 +34,7 @@ final class MockURLProtocol: URLProtocol {
 
 class CodexBarTestCase: XCTestCase {
     private var originalHome: String?
+    private var originalSkipRuntimeFlag: String?
     private var temporaryHome: URL?
 
     override func setUpWithError() throws {
@@ -42,7 +43,9 @@ class CodexBarTestCase: XCTestCase {
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         self.temporaryHome = tempDir
         self.originalHome = ProcessInfo.processInfo.environment["CODEXBAR_HOME"]
+        self.originalSkipRuntimeFlag = ProcessInfo.processInfo.environment["CODEXKIT_SKIP_CLIPROXYAPI_RUNTIME"]
         setenv("CODEXBAR_HOME", tempDir.path, 1)
+        setenv("CODEXKIT_SKIP_CLIPROXYAPI_RUNTIME", "1", 1)
         MockURLProtocol.handler = nil
     }
 
@@ -51,6 +54,11 @@ class CodexBarTestCase: XCTestCase {
             setenv("CODEXBAR_HOME", originalHome, 1)
         } else {
             unsetenv("CODEXBAR_HOME")
+        }
+        if let originalSkipRuntimeFlag {
+            setenv("CODEXKIT_SKIP_CLIPROXYAPI_RUNTIME", originalSkipRuntimeFlag, 1)
+        } else {
+            unsetenv("CODEXKIT_SKIP_CLIPROXYAPI_RUNTIME")
         }
 
         if let temporaryHome {
