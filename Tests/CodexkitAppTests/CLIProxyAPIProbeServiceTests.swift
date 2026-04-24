@@ -35,9 +35,11 @@ final class CLIProxyAPIProbeServiceTests: CodexBarTestCase {
     func testSyncSnapshotFallsBackToLocalAuthFilesWhenManagementRequestsFail() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockURLProtocol.self]
+        configuration.timeoutIntervalForRequest = 1
+        configuration.timeoutIntervalForResource = 1
         let session = URLSession(configuration: configuration)
         let service = CLIProxyAPIService(session: session)
-        let managementService = CLIProxyAPIManagementService(session: session)
+        let managementService = CLIProxyAPIManagementService(session: session, sleep: { _ in })
         let probeService = CLIProxyAPIProbeService(
             service: service,
             managementService: managementService
