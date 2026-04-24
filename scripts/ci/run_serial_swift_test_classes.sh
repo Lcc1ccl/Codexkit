@@ -23,10 +23,5 @@ for i in "${!test_classes[@]}"; do
 
   echo
   echo "==> [${run_number}/${#test_classes[@]}] ${class_name}"
-
-  if [[ "$i" -eq 0 ]]; then
-    swift test --filter "${class_name}" --no-parallel
-  else
-    swift test --skip-build --filter "${class_name}" --no-parallel
-  fi
+  swift test --filter "${class_name}" --no-parallel
 done
