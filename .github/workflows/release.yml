@@ -118,6 +118,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: Sources/CodexkitApp/Bundled/CLIProxyAPIServiceBundle/CLIProxyAPI/go.mod
+
+      - name: Build bundled CLIProxyAPI runtime for tests
+        working-directory: Sources/CodexkitApp/Bundled/CLIProxyAPIServiceBundle/CLIProxyAPI
+        run: |
+          mkdir -p ../bin
+          go build -o ../bin/cli-proxy-api-darwin-arm64 ./cmd/server
+
       - name: Run serial Swift tests
         run: swift test --no-parallel
 
