@@ -17,11 +17,67 @@ if [[ "${#test_classes[@]}" -eq 0 ]]; then
   exit 1
 fi
 
-for i in "${!test_classes[@]}"; do
-  class_name="${test_classes[$i]}"
-  run_number=$((i + 1))
+escape_regex() {
+  printf '%s' "$1" | sed 's/[.[\\*^$()+?{|]/\\&/g'
+}
+
+run_batch() {
+  local label="$1"
+  shift
+  local specs=("$@")
+
+  if [[ "${#specs[@]}" -eq 0 ]]; then
+    return
+  fi
+
+  local pattern=""
+  local first=1
+  local spec escaped
+  for spec in "${specs[@]}"; do
+    escaped="$(escape_regex "$spec")"
+    if [[ "$first" -eq 1 ]]; then
+      pattern="${escaped}"
+      first=0
+    else
+      pattern="${pattern}|${escaped}"
+    fi
+  done
 
   echo
-  echo "==> [${run_number}/${#test_classes[@]}] ${class_name}"
-  swift test --filter "${class_name}" --no-parallel
+  echo "==> ${label}"
+  swift test --filter "${pattern}" --no-parallel
+}
+
+early_classes=(
+  "CodexkitAppTests.APIServiceRoutingEnableTests"
+  "CodexkitAppTests.AppLifecycleDiagnosticsTests"
+  "CodexkitAppTests.CLIProxyAPIAuthExporterTests"
+  "CodexkitAppTests.CLIProxyAPIManagementServiceTests"
+)
+
+isolated_classes=(
+  "CodexkitAppTests.CLIProxyAPIProbeServiceTests"
+)
+
+remaining_classes=()
+for class_name in "${test_classes[@]}"; do
+  skip=0
+  for reserved in "${early_classes[@]}" "${isolated_classes[@]}"; do
+    if [[ "$class_name" == "$reserved" ]]; then
+      skip=1
+      break
+    fi
+  done
+  if [[ "$skip" -eq 0 ]]; then
+    remaining_classes+=("$class_name")
+  fi
 done
+
+half=$(( (${#remaining_classes[@]} + 1) / 2 ))
+batch_three=("${remaining_classes[@]:0:$half}")
+batch_four=("${remaining_classes[@]:$half}")
+
+run_batch "batch 1/4 early release-critical classes" "${early_classes[@]}"
+run_batch "batch 2/4 isolated CLIProxyAPI probe suite" "${isolated_classes[@]}"
+run_batch "batch 3/4 remaining suites (part 1)" "${batch_three[@]}"
+run_batch "batch 4/4 remaining suites (part 2)" "${batch_four[@]}"
