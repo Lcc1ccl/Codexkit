@@ -130,7 +130,7 @@ jobs:
           go build -o ../bin/cli-proxy-api-darwin-arm64 ./cmd/server
 
       - name: Run serial Swift tests
-        run: swift test --no-parallel
+        run: scripts/ci/run_serial_swift_test_classes.sh
 
   package:
     name: Package ${{ matrix.architecture }}
