@@ -1,0 +1,259 @@
+name: Package and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Manual version label (for example: 1.2.0 or 1.2.0-beta.1)'
+        required: false
+        type: string
+      publish_release:
+        description: 'Create or update a GitHub Release after packaging'
+        required: true
+        default: false
+        type: boolean
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    name: Prepare release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      version_label: ${{ steps.meta.outputs.version_label }}
+      version_slug: ${{ steps.meta.outputs.version_slug }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      release_name: ${{ steps.meta.outputs.release_name }}
+      should_publish: ${{ steps.meta.outputs.should_publish }}
+      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
+      repo_releases_url: ${{ steps.meta.outputs.repo_releases_url }}
+      tag_release_url: ${{ steps.meta.outputs.tag_release_url }}
+    steps:
+      - name: Resolve release metadata
+        id: meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PUBLISH_RELEASE: ${{ inputs.publish_release }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          repo_releases_url="https://github.com/${REPOSITORY}/releases"
+          version_label=""
+          should_publish="false"
+
+          if [[ "$EVENT_NAME" == "push" && "$REF_NAME" == v* ]]; then
+            version_label="${REF_NAME#v}"
+            should_publish="true"
+          else
+            if [[ -n "$INPUT_VERSION" ]]; then
+              version_label="${INPUT_VERSION#v}"
+            else
+              version_label="manual-${COMMIT_SHA::7}"
+            fi
+
+            if [[ "$INPUT_PUBLISH_RELEASE" == "true" ]]; then
+              should_publish="true"
+            fi
+          fi
+
+          if [[ "$should_publish" == "true" && "$version_label" == manual-* ]]; then
+            echo "Manual release publication requires the version input." >&2
+            exit 1
+          fi
+
+          version_slug="$(printf '%s' "$version_label" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//')"
+          if [[ -z "$version_slug" ]]; then
+            version_slug="manual-${COMMIT_SHA::7}"
+          fi
+
+          release_tag="v${version_label}"
+          release_name="Codexkit ${version_label}"
+          is_prerelease="false"
+          if [[ "$version_label" == *-alpha* || "$version_label" == *-beta* || "$version_label" == *-rc* ]]; then
+            is_prerelease="true"
+          fi
+
+          tag_release_url="${repo_releases_url}/tag/${release_tag}"
+
+          {
+            echo "version_label=${version_label}"
+            echo "version_slug=${version_slug}"
+            echo "release_tag=${release_tag}"
+            echo "release_name=${release_name}"
+            echo "should_publish=${should_publish}"
+            echo "is_prerelease=${is_prerelease}"
+            echo "repo_releases_url=${repo_releases_url}"
+            echo "tag_release_url=${tag_release_url}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        run: |
+          {
+            echo "## Release metadata"
+            echo ""
+            echo "- version: \`${{ steps.meta.outputs.version_label }}\`"
+            echo "- release tag: \`${{ steps.meta.outputs.release_tag }}\`"
+            echo "- should publish: \`${{ steps.meta.outputs.should_publish }}\`"
+            echo "- prerelease: \`${{ steps.meta.outputs.is_prerelease }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  verify:
+    name: Verify tests
+    runs-on: macos-15
+    needs: prepare
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run serial Swift tests
+        run: swift test --no-parallel
+
+  package:
+    name: Package ${{ matrix.architecture }}
+    runs-on: ${{ matrix.runner_label }}
+    needs:
+      - prepare
+      - verify
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner_label: macos-15
+            architecture: arm64
+          - runner_label: macos-15-intel
+            architecture: x86_64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: Sources/CodexkitApp/Bundled/CLIProxyAPIServiceBundle/CLIProxyAPI/go.mod
+
+      - name: Build release artifacts
+        env:
+          CODEXKIT_RELEASE_VERSION: ${{ needs.prepare.outputs.version_label }}
+          CODEXKIT_RELEASE_NOTES_URL: ${{ needs.prepare.outputs.should_publish == 'true' && needs.prepare.outputs.tag_release_url || needs.prepare.outputs.repo_releases_url }}
+          CODEXKIT_DOWNLOAD_PAGE_URL: ${{ needs.prepare.outputs.should_publish == 'true' && needs.prepare.outputs.tag_release_url || needs.prepare.outputs.repo_releases_url }}
+        run: scripts/release/build_local_release.sh
+
+      - name: Upload packaged artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: codexkit-release-${{ needs.prepare.outputs.version_slug }}-${{ matrix.architecture }}
+          path: |
+            dist/release/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Summary
+        run: |
+          {
+            echo "## Packaged ${{ matrix.architecture }}"
+            echo ""
+            find dist/release -maxdepth 1 -type f -print | sed 's#^#- `#; s#$#`#'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - prepare
+      - package
+    if: needs.prepare.outputs.should_publish == 'true'
+    permissions:
+      contents: write
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: release-artifacts
+
+      - name: Ensure GitHub CLI is available
+        run: |
+          if command -v gh >/dev/null 2>&1; then
+            gh --version
+            exit 0
+          fi
+
+          sudo apt-get update
+          sudo apt-get install -y gh
+          gh --version
+
+      - name: Collect release assets
+        id: assets
+        run: |
+          set -euo pipefail
+          mapfile -t asset_files < <(find release-artifacts -type f \( -name '*.dmg' -o -name '*.zip' \) | sort)
+          if [[ "${#asset_files[@]}" -eq 0 ]]; then
+            echo "No dmg/zip assets found to publish." >&2
+            exit 1
+          fi
+
+          {
+            echo 'asset_files<<EOF'
+            printf '%s\n' "${asset_files[@]}"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Release assets"
+            echo ""
+            printf -- '- `%s`\n' "${asset_files[@]##*/}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create GitHub Release or refresh assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          RELEASE_NAME: ${{ needs.prepare.outputs.release_name }}
+          IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
+          ASSET_FILES: ${{ steps.assets.outputs.asset_files }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          readarray -t asset_files <<< "$ASSET_FILES"
+
+          notes="$(printf '%s\n' \
+            '## Packaging' \
+            "- Workflow: ${GITHUB_WORKFLOW}" \
+            "- Commit: ${COMMIT_SHA}" \
+            '- Runner matrix: macOS 15 (Apple Silicon) + macOS 15 Intel' \
+            '' \
+            '> Current GitHub Actions packaging uses ad-hoc codesign and does **not** notarize the app yet.')"
+
+          prerelease_flag=()
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            prerelease_flag+=(--prerelease)
+          fi
+
+          if gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${asset_files[@]}" --repo "$REPOSITORY" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${asset_files[@]}" \
+              --repo "$REPOSITORY" \
+              --title "$RELEASE_NAME" \
+              --target "$COMMIT_SHA" \
+              --generate-notes \
+              --notes "$notes" \
+              "${prerelease_flag[@]}"
+          fi

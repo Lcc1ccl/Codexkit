@@ -1,0 +1,6 @@
+{
+  "source": "forks/CLIProxyAPI",
+  "delivery": "bundled-service-binary",
+  "version": "v6.9.29",
+  "executable_relative_path": "bin/cli-proxy-api-darwin-arm64"
+}
