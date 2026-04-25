@@ -2,7 +2,7 @@ import XCTest
 @testable import CodexkitApp
 
 @MainActor
-final class SettingsWindowCoordinatorTests: XCTestCase {
+final class SettingsWindowCoordinatorTests: CodexBarTestCase {
     func testInitializerSupportsStartingOnAPIServicePage() {
         let accounts = [
             self.makeAccount(email: "alpha@example.com", accountId: "acct_alpha"),
@@ -213,6 +213,7 @@ final class SettingsWindowCoordinatorTests: XCTestCase {
             self.makeAccount(email: "alpha@example.com", accountId: "acct_alpha"),
             self.makeAccount(email: "beta@example.com", accountId: "acct_beta"),
         ]
+        let codexAppPath = try self.makeValidCodexAppPath().path
         let sink = TestSettingsSaveSink(config: self.makeConfig())
         let coordinator = SettingsWindowCoordinator(
             config: sink.config,
@@ -231,7 +232,7 @@ final class SettingsWindowCoordinatorTests: XCTestCase {
         coordinator.update(\.proRelativeToPlusMultiplier, to: 14, field: .proRelativeToPlusMultiplier)
         coordinator.update(\.teamRelativeToPlusMultiplier, to: 2.2, field: .teamRelativeToPlusMultiplier)
         coordinator.selectedPage = .accounts
-        coordinator.update(\.preferredCodexAppPath, to: "/Applications/Codex.app", field: .preferredCodexAppPath)
+        coordinator.update(\.preferredCodexAppPath, to: codexAppPath, field: .preferredCodexAppPath)
         coordinator.update(\.accountActivationScopeMode, to: .specificPaths, field: .accountActivationScopeMode)
         coordinator.update(
             \.accountActivationRootPaths,
@@ -275,7 +276,7 @@ final class SettingsWindowCoordinatorTests: XCTestCase {
         XCTAssertEqual(
             requests.desktop,
             DesktopSettingsUpdate(
-                preferredCodexAppPath: "/Applications/Codex.app",
+                preferredCodexAppPath: codexAppPath,
                 accountActivationScopeMode: .specificPaths,
                 accountActivationRootPaths: ["/tmp/project-b", "/tmp/project-a"]
             )
@@ -306,7 +307,7 @@ final class SettingsWindowCoordinatorTests: XCTestCase {
         XCTAssertEqual(reopened.draft.plusRelativeWeight, 12)
         XCTAssertEqual(reopened.draft.proRelativeToPlusMultiplier, 14)
         XCTAssertEqual(reopened.draft.teamRelativeToPlusMultiplier, 2.2)
-        XCTAssertEqual(reopened.draft.preferredCodexAppPath, "/Applications/Codex.app")
+        XCTAssertEqual(reopened.draft.preferredCodexAppPath, codexAppPath)
         XCTAssertEqual(reopened.draft.accountActivationScopeMode, .specificPaths)
         XCTAssertEqual(reopened.draft.accountActivationRootPaths, ["/tmp/project-b", "/tmp/project-a"])
         XCTAssertTrue(reopened.draft.cliProxyAPIEnabled)
@@ -1053,7 +1054,12 @@ final class SettingsWindowCoordinatorTests: XCTestCase {
                     port: 8317,
                     repositoryRootPath: "/tmp/default-CLIProxyAPI",
                     managementSecretKey: "default-secret",
-                    memberAccountIDs: []
+                    clientAPIKey: "default-client-key",
+                    memberAccountIDs: [],
+                    routingStrategy: .fillFirst,
+                    switchPreviewModelOnQuotaExceeded: false,
+                    requestRetry: 2,
+                    maxRetryInterval: 20
                 )
             ),
             openAI: CodexBarOpenAISettings(
@@ -1082,6 +1088,22 @@ final class SettingsWindowCoordinatorTests: XCTestCase {
             idToken: "id-\(accountId)",
             planType: planType
         )
+    }
+
+    private func makeValidCodexAppPath() throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let appURL = root.appendingPathComponent("Codex.app", isDirectory: true)
+        let resourcesURL = appURL
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("Resources", isDirectory: true)
+        try FileManager.default.createDirectory(at: resourcesURL, withIntermediateDirectories: true)
+        let executableURL = resourcesURL.appendingPathComponent("codex")
+        try Data().write(to: executableURL)
+        self.addTeardownBlock {
+            try? FileManager.default.removeItem(at: root)
+        }
+        return appURL
     }
 }
 
