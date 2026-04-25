@@ -72,14 +72,16 @@ final class CLIProxyAPIProbeService {
     }
 
     func detectExternalRepositoryRoot() -> URL? {
-        let bundledRoot = self.service.resolveBundledRepoRoot()
-        let envRoot = self.service.processEnvironment["CLIProxyAPI_REPO_ROOT"]
-            .flatMap { self.service.resolveConfiguredRepoRoot(explicitPath: $0, environment: [:]) }
-        if let envRoot,
-           envRoot.path != bundledRoot?.path {
+        if let envRoot = self.service.processEnvironment["CLIProxyAPI_REPO_ROOT"]
+            .flatMap({ self.service.resolveConfiguredRepoRoot(explicitPath: $0, environment: [:]) }),
+           self.isBundledRepositoryRoot(envRoot) == false {
             return envRoot
         }
         return nil
+    }
+
+    private func isBundledRepositoryRoot(_ url: URL) -> Bool {
+        url.standardizedFileURL.path.hasSuffix("/CLIProxyAPIServiceBundle/CLIProxyAPI")
     }
 
     func syncSnapshot(

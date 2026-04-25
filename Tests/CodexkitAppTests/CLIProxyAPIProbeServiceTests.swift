@@ -3,7 +3,7 @@ import XCTest
 @testable import CodexkitApp
 
 final class CLIProxyAPIProbeServiceTests: CodexBarTestCase {
-    func testDetectExternalRepositoryRootFallsBackToBundledPathWhenOnlyBundledPathExists() throws {
+    func testDetectExternalRepositoryRootIgnoresBundledPathWhenOnlyBundledPathExists() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let bundledRepo = root
@@ -29,7 +29,31 @@ final class CLIProxyAPIProbeServiceTests: CodexBarTestCase {
         )
         let probeService = CLIProxyAPIProbeService(service: service)
 
-        XCTAssertEqual(probeService.detectExternalRepositoryRoot()?.path, bundledRepo.path)
+        XCTAssertNil(probeService.detectExternalRepositoryRoot())
+    }
+
+    func testDetectExternalRepositoryRootReturnsConfiguredExternalPath() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let externalRepo = root
+            .appendingPathComponent("external-cli-proxy-api", isDirectory: true)
+        let externalMain = externalRepo
+            .appendingPathComponent("cmd", isDirectory: true)
+            .appendingPathComponent("server", isDirectory: true)
+            .appendingPathComponent("main.go")
+        try FileManager.default.createDirectory(
+            at: externalMain.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("package main".utf8).write(to: externalMain)
+
+        let service = CLIProxyAPIService(
+            environment: ["CLIProxyAPI_REPO_ROOT": externalRepo.path],
+            currentDirectoryURL: root.appendingPathComponent("Codexkit", isDirectory: true)
+        )
+        let probeService = CLIProxyAPIProbeService(service: service)
+
+        XCTAssertEqual(probeService.detectExternalRepositoryRoot()?.path, externalRepo.path)
     }
 
     func testSyncSnapshotFallsBackToLocalAuthFilesWhenManagementRequestsFail() async throws {
