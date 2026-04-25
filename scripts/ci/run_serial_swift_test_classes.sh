@@ -45,8 +45,25 @@ run_batch() {
 
   echo
   echo "==> ${label}"
-  swift test --filter "${pattern}" --no-parallel
+  if [[ -n "${XCTEST_BUNDLE_PATH:-}" ]]; then
+    local selector
+    selector="$(IFS=,; echo "${specs[*]}")"
+    xcrun xctest -XCTest "${selector}" "${XCTEST_BUNDLE_PATH}"
+  else
+    swift test --filter "${pattern}" --no-parallel
+  fi
 }
+
+if [[ "$(uname -s)" == "Darwin" ]] && command -v xcrun >/dev/null 2>&1; then
+  swift build --build-tests
+  bin_path="$(swift build --build-tests --show-bin-path)"
+  candidate_bundle="${bin_path}/CodexkitPackageTests.xctest"
+  if [[ -d "${candidate_bundle}" ]]; then
+    XCTEST_BUNDLE_PATH="${candidate_bundle}"
+    export XCTEST_BUNDLE_PATH
+    echo "Using direct XCTest runner: ${XCTEST_BUNDLE_PATH}"
+  fi
+fi
 
 early_classes=(
   "CodexkitAppTests.APIServiceRoutingEnableTests"
