@@ -412,14 +412,14 @@ final class CLIProxyAPIServiceTests: CodexBarTestCase {
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let service = CLIProxyAPIService(currentDirectoryURL: root)
-        let repoRoot = URL(fileURLWithPath: "/tmp/CLIProxyAPI")
+        let repoRoot = self.makeRepoRoot(named: "CLIProxyAPI")
         let configURL = URL(fileURLWithPath: "/tmp/config.yaml")
 
         let process = service.makeLaunchProcess(repoRoot: repoRoot, configURL: configURL)
 
         XCTAssertEqual(process.executableURL?.path, "/usr/bin/env")
         XCTAssertEqual(process.arguments, ["go", "run", "./cmd/server/main.go", "-config", "/tmp/config.yaml"])
-        XCTAssertEqual(process.currentDirectoryURL?.path, "/tmp/CLIProxyAPI")
+        XCTAssertEqual(process.currentDirectoryURL?.path, repoRoot.path)
     }
 
     func testResolveConfiguredRepoRootReadsExplicitPathFirst() {
