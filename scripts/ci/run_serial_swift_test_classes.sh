@@ -9,10 +9,15 @@ fi
 
 swift_test_timeout_seconds="${CODEXKIT_SWIFT_TEST_TIMEOUT_SECONDS:-300}"
 
+test_specs=()
+while IFS= read -r line; do
+  test_specs+=("$line")
+done < <(swift test list)
+
 test_classes=()
 while IFS= read -r line; do
   test_classes+=("$line")
-done < <(swift test list | cut -d/ -f1 | sort -u)
+done < <(printf '%s\n' "${test_specs[@]}" | cut -d/ -f1 | sort -u)
 
 if [[ "${#test_classes[@]}" -eq 0 ]]; then
   echo "No Swift test classes were discovered." >&2
@@ -83,6 +88,24 @@ run_batch() {
   run_swift_test "${pattern}"
 }
 
+run_test_cases_for_class() {
+  local class_name="$1"
+  local test_spec
+  local found=0
+
+  for test_spec in "${test_specs[@]}"; do
+    if [[ "$test_spec" == "$class_name/"* ]]; then
+      found=1
+      run_batch "test ${test_spec}" "$test_spec"
+    fi
+  done
+
+  if [[ "$found" -eq 0 ]]; then
+    echo "No Swift test cases were discovered for ${class_name}." >&2
+    exit 1
+  fi
+}
+
 early_classes=(
   "CodexkitAppTests.APIServiceRoutingEnableTests"
   "CodexkitAppTests.AppLifecycleDiagnosticsTests"
@@ -112,5 +135,9 @@ run_batch "release-critical classes" "${early_classes[@]}"
 run_batch "isolated CLIProxyAPI probe suite" "${isolated_classes[@]}"
 
 for class_name in "${remaining_classes[@]}"; do
-  run_batch "suite ${class_name}" "$class_name"
+  if [[ "$class_name" == "CodexkitAppTests.CLIProxyAPIServiceTests" ]]; then
+    run_test_cases_for_class "$class_name"
+  else
+    run_batch "suite ${class_name}" "$class_name"
+  fi
 done
