@@ -7,6 +7,8 @@ if ! command -v swift >/dev/null 2>&1; then
   exit 1
 fi
 
+swift_test_timeout_seconds="${CODEXKIT_SWIFT_TEST_TIMEOUT_SECONDS:-300}"
+
 test_classes=()
 while IFS= read -r line; do
   test_classes+=("$line")
@@ -19,6 +21,39 @@ fi
 
 escape_regex() {
   printf '%s' "$1" | sed 's/[.[\\*^$()+?{|]/\\&/g'
+}
+
+run_swift_test() {
+  local pattern="$1"
+
+  python3 - "$pattern" "$swift_test_timeout_seconds" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+pattern = sys.argv[1]
+timeout_seconds = int(sys.argv[2])
+command = ["swift", "test", "--filter", pattern, "--no-parallel"]
+process = subprocess.Popen(command, start_new_session=True)
+try:
+    raise SystemExit(process.wait(timeout=timeout_seconds))
+except subprocess.TimeoutExpired:
+    print(
+        f"swift test timed out after {timeout_seconds}s for filter: {pattern}",
+        file=sys.stderr,
+        flush=True,
+    )
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=10)
+    except Exception:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except Exception:
+            pass
+        process.wait()
+    raise SystemExit(124)
+PY
 }
 
 run_batch() {
@@ -45,7 +80,7 @@ run_batch() {
 
   echo
   echo "==> ${label}"
-  swift test --filter "${pattern}" --no-parallel
+  run_swift_test "${pattern}"
 }
 
 early_classes=(
@@ -73,11 +108,9 @@ for class_name in "${test_classes[@]}"; do
   fi
 done
 
-half=$(( (${#remaining_classes[@]} + 1) / 2 ))
-batch_three=("${remaining_classes[@]:0:$half}")
-batch_four=("${remaining_classes[@]:$half}")
+run_batch "release-critical classes" "${early_classes[@]}"
+run_batch "isolated CLIProxyAPI probe suite" "${isolated_classes[@]}"
 
-run_batch "batch 1/4 early release-critical classes" "${early_classes[@]}"
-run_batch "batch 2/4 isolated CLIProxyAPI probe suite" "${isolated_classes[@]}"
-run_batch "batch 3/4 remaining suites (part 1)" "${batch_three[@]}"
-run_batch "batch 4/4 remaining suites (part 2)" "${batch_four[@]}"
+for class_name in "${remaining_classes[@]}"; do
+  run_batch "suite ${class_name}" "$class_name"
+done
