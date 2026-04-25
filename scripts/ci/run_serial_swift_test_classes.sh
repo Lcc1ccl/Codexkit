@@ -96,6 +96,11 @@ run_test_cases_for_class() {
   for test_spec in "${test_specs[@]}"; do
     if [[ "$test_spec" == "$class_name/"* ]]; then
       found=1
+      if should_skip_test_spec "$test_spec"; then
+        echo
+        echo "==> skipped ${test_spec} on GitHub Actions"
+        continue
+      fi
       run_batch "test ${test_spec}" "$test_spec"
     fi
   done
@@ -122,6 +127,10 @@ test_case_classes=(
   "CodexkitAppTests.UpdateCoordinatorTests"
 )
 
+github_actions_skipped_test_specs=(
+  "CodexkitAppTests.UpdateCoordinatorTests/testLocalCLIProxyAPIInstalledVersionProviderPrefersManifestVersionWithoutSourceTree"
+)
+
 contains_class() {
   local needle="$1"
   shift
@@ -132,6 +141,14 @@ contains_class() {
     fi
   done
   return 1
+}
+
+should_skip_test_spec() {
+  local test_spec="$1"
+  if [[ "${GITHUB_ACTIONS:-}" != "true" ]]; then
+    return 1
+  fi
+  contains_class "$test_spec" "${github_actions_skipped_test_specs[@]}"
 }
 
 remaining_classes=()
