@@ -399,19 +399,13 @@ final class CLIProxyAPIServiceTests: CodexBarTestCase {
         try FileManager.default.setAttributes([.posixPermissions: NSNumber(value: Int16(0o755))], ofItemAtPath: executable.path)
 
         let service = CLIProxyAPIService(currentDirectoryURL: root)
-        let repoRoot = root
-            .appendingPathComponent("Codexkit", isDirectory: true)
-            .appendingPathComponent("Sources", isDirectory: true)
-            .appendingPathComponent("CodexkitApp", isDirectory: true)
-            .appendingPathComponent("Bundled", isDirectory: true)
-            .appendingPathComponent("CLIProxyAPIServiceBundle", isDirectory: true)
-            .appendingPathComponent("CLIProxyAPI", isDirectory: true)
         let configURL = URL(fileURLWithPath: "/tmp/config.yaml")
 
-        let process = service.makeLaunchProcess(repoRoot: repoRoot, configURL: configURL)
+        let process = service.makeLaunchProcess(repoRoot: nil, configURL: configURL)
 
-        XCTAssertEqual(process.executableURL?.path, "/usr/bin/env")
-        XCTAssertEqual(process.arguments, ["go", "run", "./cmd/server/main.go", "-config", "/tmp/config.yaml"])
+        XCTAssertEqual(process.executableURL?.path, executable.path)
+        XCTAssertEqual(process.arguments, ["-config", "/tmp/config.yaml"])
+        XCTAssertEqual(process.currentDirectoryURL?.path, CLIProxyAPIService.runtimeRootURL.path)
     }
 
     func testMakeLaunchProcessTargetsCLIProxyAPIRepoAndConfig() {
