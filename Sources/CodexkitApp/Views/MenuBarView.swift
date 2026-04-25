@@ -473,11 +473,6 @@ struct MenuBarView: View {
         formatter.dateFormat = "MM-dd"
         return formatter
     }()
-    private static let apiServiceDateTimeFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MM-dd HH:mm"
-        return formatter
-    }()
 
     private var groupedAccounts: [OpenAIAccountGroup] {
         OpenAIAccountListLayout.groupedAccounts(
@@ -732,7 +727,7 @@ struct MenuBarView: View {
                 .padding(.vertical, 6)
             }
 
-            if let error = showError, self.apiServiceInlineWarningMessage == nil {
+            if let error = showError, self.apiServiceStatusBannerMessage == nil {
                 Divider()
                 HStack {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -927,30 +922,6 @@ struct MenuBarView: View {
                 .help(L.settingsAPIServiceCopyValue)
             }
 
-            if let quotaSnapshot = self.store.cliProxyAPIState.quotaSnapshot {
-                self.apiServiceInfoRow(
-                    title: L.menuAPIServiceQuotaLabel,
-                    value: self.menuAPIServiceQuotaSummary(snapshot: quotaSnapshot)
-                ) {
-                    EmptyView()
-                }
-                self.apiServiceInfoRow(
-                    title: L.menuAPIServiceUpdatedLabel,
-                    value: self.menuAPIServiceQuotaFreshness(snapshot: quotaSnapshot)
-                ) {
-                    Button {
-                        Task { await CLIProxyAPIRuntimeController.shared.refreshQuotaSnapshot(trigger: "menubar") }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 10, weight: .medium))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.mini)
-                    .disabled(self.isAPIServiceRuntimeActive == false)
-                    .help(L.settingsAPIServiceRefreshQuota)
-                }
-            }
-
             HStack(alignment: .center, spacing: 18) {
                 self.apiServiceToggleControl(
                     title: L.menuAPIServiceRuntimeToggleTitle,
@@ -973,33 +944,19 @@ struct MenuBarView: View {
             .id(self.apiServiceToggleRefreshKey)
             .frame(maxWidth: .infinity)
 
-            if let inlineWarning = self.apiServiceInlineWarningMessage {
-                HStack(alignment: .center, spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.yellow)
-                    Text(inlineWarning)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(Color.white.opacity(0.92))
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 0)
-                    Button {
-                        self.showError = nil
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 9, weight: .semibold))
-                    }
-                    .buttonStyle(.borderless)
-                    .foregroundColor(.secondary)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(Color.orange.opacity(0.16))
+            if let bannerMessage = self.apiServiceStatusBannerMessage {
+                self.apiServiceStatusBanner(
+                    message: bannerMessage,
+                    isInfo: self.apiServiceStatusBannerIsInfo
                 )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.orange.opacity(0.35), lineWidth: 1)
+            }
+
+            if let apiServiceFallbackBanner {
+                self.openAIStatusBanner(
+                    apiServiceFallbackBanner,
+                    onAction: {
+                        self.handleAPIServiceFallbackBannerAction(apiServiceFallbackBanner)
+                    }
                 )
             }
         }
@@ -1065,13 +1022,70 @@ struct MenuBarView: View {
         L.languageOverride == nil ? self.footerToolbarIconColor : Color.primary.opacity(0.95)
     }
 
-    private var apiServiceInlineWarningMessage: String? {
+    private var apiServiceStatusBannerMessage: String? {
         guard let error = self.showError else { return nil }
-        let inlineMessages = [
+        let exactMessages = [
+            L.menuAPIServiceRoutingProbeSuccess,
+            L.apiServiceFallbackRestoreCompleted,
             L.menuAPIServiceSetupRequiredMessage,
             L.menuAPIServiceStartRequiredMessage
         ]
-        return inlineMessages.contains(error) ? error : nil
+        if exactMessages.contains(error) {
+            return error
+        }
+
+        let normalized = error.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let keywords = [
+            "api service",
+            "api服务",
+            "api 服务",
+            "cliproxyapi",
+            "routing probe",
+            "management authentication required",
+            "health check failed"
+        ]
+        return keywords.contains(where: { normalized.contains($0) }) ? error : nil
+    }
+
+    private var apiServiceStatusBannerIsInfo: Bool {
+        guard let message = self.apiServiceStatusBannerMessage else { return false }
+        return [
+            L.menuAPIServiceRoutingProbeSuccess,
+            L.apiServiceFallbackRestoreCompleted
+        ].contains(message)
+    }
+
+    private func apiServiceStatusBanner(message: String, isInfo: Bool) -> some View {
+        let foregroundColor = isInfo ? Color.accentColor : Color.orange
+        let iconName = isInfo ? "info.circle.fill" : "exclamationmark.triangle.fill"
+
+        return HStack(alignment: .center, spacing: 8) {
+            Image(systemName: iconName)
+                .foregroundColor(foregroundColor)
+            Text(message)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(Color.white.opacity(0.92))
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button {
+                self.showError = nil
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .semibold))
+            }
+            .buttonStyle(.borderless)
+            .foregroundColor(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(foregroundColor.opacity(0.16))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(foregroundColor.opacity(0.35), lineWidth: 1)
+        )
     }
 
     private func apiServiceToggleControl(
@@ -1163,15 +1177,6 @@ struct MenuBarView: View {
                     },
                     onDismiss: {
                         self.lastOpenAIManualSwitchResult = nil
-                    }
-                )
-            }
-
-            if let apiServiceFallbackBanner {
-                self.openAIStatusBanner(
-                    apiServiceFallbackBanner,
-                    onAction: {
-                        self.handleAPIServiceFallbackBannerAction(apiServiceFallbackBanner)
                     }
                 )
             }
@@ -1791,11 +1796,13 @@ struct MenuBarView: View {
     private func toggleAPIServiceEnabled() {
         let settings = self.store.config.desktop.cliProxyAPI
         if settings.enabled {
-            do {
-                try self.store.setAPIServiceRoutingEnabledFromMenu(false)
-                self.showError = nil
-            } catch {
-                self.showError = error.localizedDescription
+            Task {
+                do {
+                    try await self.store.setAPIServiceRoutingEnabledFromMenu(false)
+                    self.showError = nil
+                } catch {
+                    self.showError = error.localizedDescription
+                }
             }
             return
         }
@@ -1821,18 +1828,29 @@ struct MenuBarView: View {
     }
 
     private func toggleAPIServiceRuntime() {
-        let settings = self.store.config.desktop.cliProxyAPI
         if self.isAPIServiceRuntimeActive {
-            CLIProxyAPIRuntimeController.shared.stop()
-            self.showError = nil
+            Task {
+                do {
+                    try await self.store.setAPIServiceRuntimeRunningFromMenu(false)
+                    self.showError = nil
+                } catch {
+                    self.showError = error.localizedDescription
+                }
+            }
             return
         }
         guard self.isAPIServiceConfigComplete else {
             self.showError = L.menuAPIServiceSetupRequiredMessage
             return
         }
-        CLIProxyAPIRuntimeController.shared.applyConfiguration(settings)
-        self.showError = nil
+        Task {
+            do {
+                try await self.store.setAPIServiceRuntimeRunningFromMenu(true)
+                self.showError = nil
+            } catch {
+                self.showError = error.localizedDescription
+            }
+        }
     }
 
     private func clearResolvedAPIServicePreflightWarning() {
@@ -2139,19 +2157,6 @@ struct MenuBarView: View {
                 }
             }
         }
-    }
-
-    private func menuAPIServiceQuotaSummary(snapshot: CLIProxyAPIQuotaSnapshot) -> String {
-        let fiveHour = snapshot.minimumFiveHourRemainingPercent.map { "\($0)%" } ?? "--"
-        let weekly = snapshot.minimumWeeklyRemainingPercent.map { "\($0)%" } ?? "--"
-        return "\(L.settingsAPIServiceRemaining5h) \(fiveHour) · \(L.settingsAPIServiceRemainingWeekly) \(weekly)"
-    }
-
-    private func menuAPIServiceQuotaFreshness(snapshot: CLIProxyAPIQuotaSnapshot) -> String {
-        let updated = snapshot.latestRefreshDate.map { Self.apiServiceDateTimeFormatter.string(from: $0) } ?? "--"
-        let status = snapshot.refreshStatus.rawValue
-        let stale = snapshot.stale ? " · stale" : ""
-        return "\(updated) · \(status)\(stale)"
     }
 
     private func switchAccountAndLaunchNewInstance(

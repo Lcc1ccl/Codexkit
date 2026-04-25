@@ -155,7 +155,7 @@ final class TokenStoreGatewayLifecycleTests: CodexBarTestCase {
         XCTAssertEqual(store.config.active.accountId, initialAccountID)
     }
 
-    func testDisablingAPIServiceRestoresStoredCompatibleProviderSelection() throws {
+    func testDisablingAPIServiceRestoresStoredCompatibleProviderSelection() async throws {
         let syncService = RecordingSyncService()
         let oauthAccount = try self.makeOAuthAccount(
             accountID: "acct-restore-compatible-oauth",
@@ -201,7 +201,7 @@ final class TokenStoreGatewayLifecycleTests: CodexBarTestCase {
             codexRunningProcessIDs: { [] }
         )
 
-        try store.setAPIServiceRoutingEnabledFromMenu(false)
+        try await store.setAPIServiceRoutingEnabledFromMenu(false)
 
         XCTAssertFalse(store.config.desktop.cliProxyAPI.enabled)
         XCTAssertEqual(store.config.active.providerId, compatible.provider.id)
@@ -212,7 +212,7 @@ final class TokenStoreGatewayLifecycleTests: CodexBarTestCase {
         XCTAssertEqual(syncService.lastConfig?.active.accountId, compatible.account.id)
     }
 
-    func testDisablingAPIServiceRestoresStoredOpenRouterSelection() throws {
+    func testDisablingAPIServiceRestoresStoredOpenRouterSelection() async throws {
         let syncService = RecordingSyncService()
         let oauthAccount = try self.makeOAuthAccount(
             accountID: "acct-restore-openrouter-oauth",
@@ -259,7 +259,7 @@ final class TokenStoreGatewayLifecycleTests: CodexBarTestCase {
             codexRunningProcessIDs: { [] }
         )
 
-        try store.setAPIServiceRoutingEnabledFromMenu(false)
+        try await store.setAPIServiceRoutingEnabledFromMenu(false)
 
         XCTAssertFalse(store.config.desktop.cliProxyAPI.enabled)
         XCTAssertEqual(store.config.active.providerId, openRouterProvider.id)

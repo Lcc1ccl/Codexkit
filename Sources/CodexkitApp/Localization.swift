@@ -229,12 +229,15 @@ enum L {
     }
     static var settingsAPIServiceAddress: String { zh ? "服务地址" : "Service Address" }
     static var settingsAPIServicePort: String { zh ? "服务端口" : "Service Port" }
-    static var settingsAPIServiceManagementKey: String { zh ? "密钥" : "Key" }
+    static var settingsAPIServiceManagementKey: String { zh ? "管理密钥" : "Management Key" }
+    static var settingsAPIServiceClientAPIKey: String { zh ? "客户端 API Key" : "Client API Key" }
     static var settingsAPIServiceImportConfig: String { zh ? "导入 CliproxyAPI 配置" : "Import CliproxyAPI Config" }
     static var settingsAPIServiceMembers: String { zh ? "服务成员账号" : "Service Member Accounts" }
     static var settingsAPIServiceRestrictFreeAccounts: String { zh ? "限制 FREE 账号" : "Limit FREE Accounts" }
     static var settingsAPIServiceAddressPlaceholder: String { zh ? "例如：127.0.0.1" : "For example: 127.0.0.1" }
-    static var settingsAPIServiceKeyPlaceholder: String { zh ? "输入或生成管理密钥" : "Enter or generate a management key" }
+    static var settingsAPIServiceClientAPIKeyPlaceholder: String {
+        zh ? "输入或生成客户端 API Key" : "Enter or generate a client API key"
+    }
     static var settingsAPIServiceCopyValue: String { zh ? "复制" : "Copy" }
     static var settingsAPIServiceRandomizePort: String { zh ? "随机端口" : "Random Port" }
     static var settingsAPIServiceRandomizeKey: String { zh ? "随机生成密钥" : "Random Key" }
@@ -334,7 +337,7 @@ enum L {
     static var menuAPIServiceRoutingEnabled: String { zh ? "配置接管已启用" : "Routing Enabled" }
     static var menuAPIServiceRoutingDisabled: String { zh ? "配置接管未启用" : "Routing Disabled" }
     static var menuAPIServiceAddressLabel: String { zh ? "地址" : "Address" }
-    static var menuAPIServiceKeyLabel: String { zh ? "密钥" : "Key" }
+    static var menuAPIServiceKeyLabel: String { zh ? "管理密钥" : "Management Key" }
     static var menuAPIServicePortLabel: String { zh ? "端口" : "Port" }
     static var menuAPIServiceRepoLabel: String { zh ? "仓库" : "Repo" }
     static var menuAPIServiceMembersLabel: String { zh ? "成员" : "Members" }

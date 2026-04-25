@@ -275,6 +275,114 @@ final class CLIProxyAPIServiceTests: CodexBarTestCase {
         XCTAssertEqual(detected?.path, executable.path)
     }
 
+    func testEnsureRuntimeDirectoriesCreatesManagedRuntimeSubdirectories() throws {
+        let service = CLIProxyAPIService()
+
+        try service.ensureRuntimeDirectories()
+
+        for directory in [
+            CLIProxyAPIService.runtimeRootURL,
+            CLIProxyAPIService.authDirectoryURL,
+            CLIProxyAPIService.logsDirectoryURL,
+            CLIProxyAPIService.staticDirectoryURL,
+            CLIProxyAPIService.managedDownloadsDirectoryURL,
+            CLIProxyAPIService.managedInstallStagingDirectoryURL,
+            CLIProxyAPIService.managedVersionsDirectoryURL,
+            CLIProxyAPIService.managedBinDirectoryURL,
+        ] {
+            var isDirectory: ObjCBool = false
+            XCTAssertTrue(FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory))
+            XCTAssertTrue(isDirectory.boolValue, "\(directory.path) should be a directory")
+            XCTAssertTrue(directory.path.hasPrefix(CLIProxyAPIService.runtimeRootURL.path))
+        }
+    }
+
+    func testResolveManagedRuntimeDescriptorReadsActiveVersionMetadata() throws {
+        let service = CLIProxyAPIService()
+        let executable = CLIProxyAPIService.managedVersionsDirectoryURL
+            .appendingPathComponent("v9.0.0", isDirectory: true)
+            .appendingPathComponent("cli-proxy-api")
+        try self.writeExecutable(at: executable)
+        try service.writeManagedRuntimeDescriptor(
+            CLIProxyAPIService.ManagedRuntimeDescriptor(
+                version: "v9.0.0",
+                executableRelativePath: "versions/v9.0.0/cli-proxy-api",
+                artifactName: "CLIProxyAPI_9.0.0_darwin_arm64.tar.gz",
+                downloadURL: URL(string: "https://example.com/cpa.tar.gz")!,
+                installedAt: nil,
+                previousVersion: "v8.9.9",
+                previousExecutableRelativePath: "versions/v8.9.9/cli-proxy-api"
+            )
+        )
+
+        let descriptor = service.resolveManagedRuntimeDescriptor()
+
+        XCTAssertEqual(descriptor?.version, "v9.0.0")
+        XCTAssertEqual(service.managedExecutableURL()?.path, executable.path)
+    }
+
+    func testMakeLaunchProcessPrefersManagedRuntimeExecutableAndManagedCwd() throws {
+        let service = CLIProxyAPIService(environment: ["PATH": "/usr/bin"])
+        let executable = CLIProxyAPIService.managedVersionsDirectoryURL
+            .appendingPathComponent("v9.0.1", isDirectory: true)
+            .appendingPathComponent("cli-proxy-api")
+        try self.writeExecutable(at: executable)
+        try service.writeManagedRuntimeDescriptor(
+            CLIProxyAPIService.ManagedRuntimeDescriptor(
+                version: "v9.0.1",
+                executableRelativePath: "versions/v9.0.1/cli-proxy-api",
+                artifactName: nil,
+                downloadURL: nil,
+                installedAt: nil,
+                previousVersion: nil,
+                previousExecutableRelativePath: nil
+            )
+        )
+        let configURL = CLIProxyAPIService.configURL
+
+        let process = service.makeLaunchProcess(
+            repoRoot: URL(fileURLWithPath: "/tmp/ignored-bundled-root", isDirectory: true),
+            configURL: configURL
+        )
+
+        XCTAssertEqual(process.executableURL?.path, executable.path)
+        XCTAssertEqual(process.arguments, ["-config", configURL.path])
+        XCTAssertEqual(process.currentDirectoryURL?.path, CLIProxyAPIService.runtimeRootURL.path)
+        XCTAssertEqual(process.environment?["WRITABLE_PATH"], CLIProxyAPIService.runtimeRootURL.path)
+        XCTAssertEqual(process.environment?["CLI_PROXY_API_RUNTIME_ROOT"], CLIProxyAPIService.runtimeRootURL.path)
+    }
+
+    func testMakeLaunchProcessUsesManagedCwdForBundledExecutableFallback() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let bundleRoot = root
+            .appendingPathComponent("Codexkit", isDirectory: true)
+            .appendingPathComponent("Sources", isDirectory: true)
+            .appendingPathComponent("CodexkitApp", isDirectory: true)
+            .appendingPathComponent("Bundled", isDirectory: true)
+            .appendingPathComponent("CLIProxyAPIServiceBundle", isDirectory: true)
+        let executable = bundleRoot
+            .appendingPathComponent("bin", isDirectory: true)
+            .appendingPathComponent("cli-proxy-api-darwin-arm64")
+        let repoRoot = bundleRoot.appendingPathComponent("CLIProxyAPI", isDirectory: true)
+        let mainGo = repoRoot
+            .appendingPathComponent("cmd", isDirectory: true)
+            .appendingPathComponent("server", isDirectory: true)
+            .appendingPathComponent("main.go")
+        try self.writeExecutable(at: executable)
+        try FileManager.default.createDirectory(at: mainGo.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("package main".utf8).write(to: mainGo)
+        let service = CLIProxyAPIService(environment: ["PATH": "/usr/bin"], currentDirectoryURL: root)
+        let configURL = CLIProxyAPIService.configURL
+
+        let process = service.makeLaunchProcess(repoRoot: nil, configURL: configURL)
+
+        XCTAssertEqual(process.executableURL?.path, executable.path)
+        XCTAssertEqual(process.arguments, ["-config", configURL.path])
+        XCTAssertEqual(process.currentDirectoryURL?.path, CLIProxyAPIService.runtimeRootURL.path)
+        XCTAssertEqual(process.environment?["WRITABLE_PATH"], CLIProxyAPIService.runtimeRootURL.path)
+    }
+
     func testMakeLaunchProcessPrefersBundledExecutableWhenPresent() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -473,5 +581,14 @@ final class CLIProxyAPIServiceTests: CodexBarTestCase {
         )
         try? Data("package main".utf8).write(to: mainGo)
         return root
+    }
+
+    private func writeExecutable(at url: URL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: url)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: Int16(0o755))],
+            ofItemAtPath: url.path
+        )
     }
 }

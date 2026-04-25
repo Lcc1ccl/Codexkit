@@ -22,6 +22,16 @@ final class CLIProxyAPIService {
         }
     }
 
+    struct ManagedRuntimeDescriptor: Codable, Equatable {
+        var version: String
+        var executableRelativePath: String
+        var artifactName: String?
+        var downloadURL: URL?
+        var installedAt: Date?
+        var previousVersion: String?
+        var previousExecutableRelativePath: String?
+    }
+
     struct LocalConfiguration: Equatable {
         var host: String?
         var port: Int?
@@ -108,6 +118,34 @@ final class CLIProxyAPIService {
         self.stagedRuntimeRootURL.appendingPathComponent("auth", isDirectory: true)
     }
 
+    static var managedBinDirectoryURL: URL {
+        self.runtimeRootURL.appendingPathComponent("bin", isDirectory: true)
+    }
+
+    static var managedVersionsDirectoryURL: URL {
+        self.runtimeRootURL.appendingPathComponent("versions", isDirectory: true)
+    }
+
+    static var managedDownloadsDirectoryURL: URL {
+        self.runtimeRootURL.appendingPathComponent("downloads", isDirectory: true)
+    }
+
+    static var managedInstallStagingDirectoryURL: URL {
+        self.runtimeRootURL.appendingPathComponent("staged", isDirectory: true)
+    }
+
+    static var logsDirectoryURL: URL {
+        self.runtimeRootURL.appendingPathComponent("logs", isDirectory: true)
+    }
+
+    static var staticDirectoryURL: URL {
+        self.runtimeRootURL.appendingPathComponent("static", isDirectory: true)
+    }
+
+    static var activeManagedVersionURL: URL {
+        self.runtimeRootURL.appendingPathComponent("active-version.json")
+    }
+
     static var bundledServiceRelativePath: String { "CLIProxyAPIServiceBundle/CLIProxyAPI" }
     static var bundledManifestRelativePath: String { "CLIProxyAPIServiceBundle/bundle-manifest.json" }
     static var bundledExecutableRelativePath: String {
@@ -168,6 +206,13 @@ final class CLIProxyAPIService {
         let authURL = staged ? Self.stagedAuthDirectoryURL : Self.authDirectoryURL
         try self.fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
         try self.fileManager.createDirectory(at: authURL, withIntermediateDirectories: true)
+        guard staged == false else { return }
+        try self.fileManager.createDirectory(at: Self.managedBinDirectoryURL, withIntermediateDirectories: true)
+        try self.fileManager.createDirectory(at: Self.managedVersionsDirectoryURL, withIntermediateDirectories: true)
+        try self.fileManager.createDirectory(at: Self.managedDownloadsDirectoryURL, withIntermediateDirectories: true)
+        try self.fileManager.createDirectory(at: Self.managedInstallStagingDirectoryURL, withIntermediateDirectories: true)
+        try self.fileManager.createDirectory(at: Self.logsDirectoryURL, withIntermediateDirectories: true)
+        try self.fileManager.createDirectory(at: Self.staticDirectoryURL, withIntermediateDirectories: true)
     }
 
     func renderConfigYAML(_ config: CLIProxyAPIServiceConfig) -> String {
@@ -317,6 +362,109 @@ final class CLIProxyAPIService {
         self.loadConfig(from: Self.configURL)
     }
 
+    func resolveManagedRuntimeDescriptor() -> ManagedRuntimeDescriptor? {
+        guard let data = try? Data(contentsOf: Self.activeManagedVersionURL) else {
+            return nil
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode(ManagedRuntimeDescriptor.self, from: data)
+    }
+
+    @discardableResult
+    func writeManagedRuntimeDescriptor(_ descriptor: ManagedRuntimeDescriptor) throws -> URL {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(descriptor)
+        try CodexPaths.writeSecureFile(data, to: Self.activeManagedVersionURL)
+        return Self.activeManagedVersionURL
+    }
+
+    func managedExecutableURL() -> URL? {
+        guard let descriptor = self.resolveManagedRuntimeDescriptor(),
+              let executableURL = self.runtimeURL(relativePath: descriptor.executableRelativePath),
+              self.isExecutableFile(executableURL) else {
+            return nil
+        }
+        return executableURL
+    }
+
+    func hasManagedRuntime() -> Bool {
+        self.managedExecutableURL() != nil
+    }
+
+    func managedProcessEnvironment() -> [String: String] {
+        var processEnvironment = self.environment
+        processEnvironment["WRITABLE_PATH"] = Self.runtimeRootURL.path
+        processEnvironment["CLI_PROXY_API_RUNTIME_ROOT"] = Self.runtimeRootURL.path
+        return processEnvironment
+    }
+
+    @discardableResult
+    func installManagedRuntime(
+        version: String,
+        artifact: CLIProxyAPIReleaseArtifact
+    ) async throws -> ManagedRuntimeDescriptor {
+        try self.ensureRuntimeDirectories()
+
+        let safeVersion = Self.safePathComponent(version)
+        let safeArtifactName = Self.safePathComponent(artifact.name)
+        let downloadDirectoryURL = Self.managedDownloadsDirectoryURL
+            .appendingPathComponent(safeVersion, isDirectory: true)
+        try self.fileManager.createDirectory(at: downloadDirectoryURL, withIntermediateDirectories: true)
+        let downloadedArtifactURL = downloadDirectoryURL.appendingPathComponent(safeArtifactName)
+
+        let (data, response) = try await self.session.data(from: artifact.downloadURL)
+        if let http = response as? HTTPURLResponse,
+           (200...299).contains(http.statusCode) == false {
+            throw NSError(
+                domain: "CLIProxyAPIUpdate",
+                code: http.statusCode,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "CLIProxyAPI artifact download failed with status code \(http.statusCode).",
+                ]
+            )
+        }
+        try data.write(to: downloadedArtifactURL, options: .atomic)
+
+        let stagingRootURL = Self.managedInstallStagingDirectoryURL
+            .appendingPathComponent("\(safeVersion)-\(UUID().uuidString)", isDirectory: true)
+        try self.fileManager.createDirectory(at: stagingRootURL, withIntermediateDirectories: true)
+        defer { try? self.fileManager.removeItem(at: stagingRootURL) }
+
+        let stagedExecutableURL = try self.stageExecutable(
+            artifact: artifact,
+            downloadedArtifactURL: downloadedArtifactURL,
+            stagingRootURL: stagingRootURL
+        )
+
+        let versionDirectoryURL = try self.uniqueVersionDirectory(safeVersion: safeVersion)
+        try self.fileManager.createDirectory(at: versionDirectoryURL, withIntermediateDirectories: true)
+        let installedExecutableURL = versionDirectoryURL.appendingPathComponent("cli-proxy-api")
+        if self.fileManager.fileExists(atPath: installedExecutableURL.path) {
+            try self.fileManager.removeItem(at: installedExecutableURL)
+        }
+        try self.fileManager.copyItem(at: stagedExecutableURL, to: installedExecutableURL)
+        try self.fileManager.setAttributes(
+            [.posixPermissions: NSNumber(value: Int16(0o755))],
+            ofItemAtPath: installedExecutableURL.path
+        )
+
+        let previousDescriptor = self.resolveManagedRuntimeDescriptor()
+        let descriptor = ManagedRuntimeDescriptor(
+            version: version,
+            executableRelativePath: try self.relativeRuntimePath(for: installedExecutableURL),
+            artifactName: artifact.name,
+            downloadURL: artifact.downloadURL,
+            installedAt: Date(),
+            previousVersion: previousDescriptor?.version,
+            previousExecutableRelativePath: previousDescriptor?.executableRelativePath
+        )
+        try self.writeManagedRuntimeDescriptor(descriptor)
+        return descriptor
+    }
+
     func resolveConfiguredRepoRoot(
         explicitPath: String? = nil,
         environment: [String: String]? = nil
@@ -412,6 +560,16 @@ final class CLIProxyAPIService {
         configURL: URL = CLIProxyAPIService.configURL
     ) -> Process {
         let process = Process()
+        try? self.ensureRuntimeDirectories()
+
+        if let executableURL = self.managedExecutableURL() {
+            process.executableURL = executableURL
+            process.arguments = ["-config", configURL.path]
+            process.currentDirectoryURL = Self.runtimeRootURL
+            process.environment = self.managedProcessEnvironment()
+            return process
+        }
+
         let searchRoots = repoRoot.map { [$0] }
         let shouldPreferBundledExecutable: Bool
         if let repoRoot {
@@ -428,7 +586,8 @@ final class CLIProxyAPIService {
            let executableURL = self.bundledExecutableURL(searchRoots: searchRoots) {
             process.executableURL = executableURL
             process.arguments = ["-config", configURL.path]
-            process.currentDirectoryURL = executableURL.deletingLastPathComponent()
+            process.currentDirectoryURL = Self.runtimeRootURL
+            process.environment = self.managedProcessEnvironment()
         } else {
             guard let repoRoot else {
                 process.executableURL = URL(fileURLWithPath: "/usr/bin/false")
@@ -441,6 +600,7 @@ final class CLIProxyAPIService {
                 "-config", configURL.path,
             ]
             process.currentDirectoryURL = repoRoot
+            process.environment = self.managedProcessEnvironment()
         }
         return process
     }
@@ -455,6 +615,136 @@ final class CLIProxyAPIService {
             return payload.status == nil || payload.status == "ok"
         }
         return true
+    }
+
+    private func stageExecutable(
+        artifact: CLIProxyAPIReleaseArtifact,
+        downloadedArtifactURL: URL,
+        stagingRootURL: URL
+    ) throws -> URL {
+        switch artifact.format {
+        case .tarGzip:
+            try self.runExtractionTool(
+                executablePath: "/usr/bin/tar",
+                arguments: ["-xzf", downloadedArtifactURL.path, "-C", stagingRootURL.path]
+            )
+        case .zip:
+            try self.runExtractionTool(
+                executablePath: "/usr/bin/ditto",
+                arguments: ["-x", "-k", downloadedArtifactURL.path, stagingRootURL.path]
+            )
+        case .executable:
+            let executableURL = stagingRootURL.appendingPathComponent("cli-proxy-api")
+            try self.fileManager.copyItem(at: downloadedArtifactURL, to: executableURL)
+            try self.fileManager.setAttributes(
+                [.posixPermissions: NSNumber(value: Int16(0o755))],
+                ofItemAtPath: executableURL.path
+            )
+        }
+
+        guard let executableURL = self.findCLIProxyAPIExecutable(in: stagingRootURL) else {
+            throw NSError(
+                domain: "CLIProxyAPIUpdate",
+                code: 2,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "CLIProxyAPI artifact did not contain an executable runtime.",
+                ]
+            )
+        }
+        return executableURL
+    }
+
+    private func runExtractionTool(
+        executablePath: String,
+        arguments: [String]
+    ) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = arguments
+
+        let errorPipe = Pipe()
+        process.standardError = errorPipe
+        process.standardOutput = Pipe()
+        try process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            let data = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            let message = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw NSError(
+                domain: "CLIProxyAPIUpdate",
+                code: Int(process.terminationStatus),
+                userInfo: [
+                    NSLocalizedDescriptionKey: message?.isEmpty == false
+                        ? "CLIProxyAPI artifact extraction failed: \(message!)"
+                        : "CLIProxyAPI artifact extraction failed.",
+                ]
+            )
+        }
+    }
+
+    private func findCLIProxyAPIExecutable(in rootURL: URL) -> URL? {
+        guard let enumerator = self.fileManager.enumerator(
+            at: rootURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+
+        var fallbackExecutableURL: URL?
+        for case let candidate as URL in enumerator {
+            let values = try? candidate.resourceValues(forKeys: [.isDirectoryKey])
+            guard values?.isDirectory != true else { continue }
+            guard self.isExecutableFile(candidate) else { continue }
+            if candidate.lastPathComponent == "cli-proxy-api" {
+                return candidate
+            }
+            if fallbackExecutableURL == nil {
+                fallbackExecutableURL = candidate
+            }
+        }
+        return fallbackExecutableURL
+    }
+
+    private func uniqueVersionDirectory(safeVersion: String) throws -> URL {
+        let baseURL = Self.managedVersionsDirectoryURL
+            .appendingPathComponent(safeVersion, isDirectory: true)
+        guard self.fileManager.fileExists(atPath: baseURL.path) else {
+            return baseURL
+        }
+        let uniqueURL = Self.managedVersionsDirectoryURL
+            .appendingPathComponent("\(safeVersion)-\(UUID().uuidString)", isDirectory: true)
+        return uniqueURL
+    }
+
+    private func relativeRuntimePath(for url: URL) throws -> String {
+        let rootPath = Self.runtimeRootURL.standardizedFileURL.path
+        let targetPath = url.standardizedFileURL.path
+        guard targetPath.hasPrefix(rootPath + "/") else {
+            throw NSError(
+                domain: "CLIProxyAPIUpdate",
+                code: 3,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "CLIProxyAPI managed executable escaped the managed runtime root.",
+                ]
+            )
+        }
+        return String(targetPath.dropFirst(rootPath.count + 1))
+    }
+
+    private func runtimeURL(relativePath: String) -> URL? {
+        let trimmed = relativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false, trimmed.hasPrefix("/") == false else {
+            return nil
+        }
+        let rootURL = Self.runtimeRootURL.standardizedFileURL
+        let candidateURL = rootURL.appendingPathComponent(trimmed).standardizedFileURL
+        guard candidateURL.path.hasPrefix(rootURL.path + "/") else {
+            return nil
+        }
+        return candidateURL
     }
 
     private func defaultSearchRoots() -> [URL] {
@@ -613,6 +903,15 @@ final class CLIProxyAPIService {
         value
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    private static func safePathComponent(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-"))
+        let sanitizedScalars = value.trimmingCharacters(in: .whitespacesAndNewlines).unicodeScalars.map { scalar in
+            allowed.contains(scalar) ? Character(scalar) : "_"
+        }
+        let sanitized = String(sanitizedScalars)
+        return sanitized.isEmpty ? UUID().uuidString : sanitized
     }
 
     private static func normalizedSecret(_ value: String?) -> String? {

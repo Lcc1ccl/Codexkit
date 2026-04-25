@@ -51,6 +51,7 @@ final class APIServiceRoutingEnableTests: CodexBarTestCase {
             configStore: CodexBarConfigStore(),
             syncService: syncService,
             openRouterGatewayService: OpenRouterGatewayControllerSpy(),
+            apiServiceRuntimeController: { RuntimeControllerSpy() },
             apiServiceRoutingProbeAction: { _ in
                 probeCallCount += 1
             },
@@ -61,6 +62,43 @@ final class APIServiceRoutingEnableTests: CodexBarTestCase {
 
         XCTAssertEqual(message, L.menuAPIServiceRoutingProbeSuccess)
         XCTAssertTrue(store.config.desktop.cliProxyAPI.enabled)
+        XCTAssertEqual(probeCallCount, 1)
+        XCTAssertEqual(syncService.restoreCallCount, 0)
+    }
+
+    func testEnableRoutingReusesAdoptableRunningServiceBeforeProbe() async throws {
+        let oauthAccount = try self.makeOAuthAccount(
+            accountID: "acct-probe-reuse",
+            email: "probe-reuse@example.com"
+        )
+        let storedOAuthAccount = CodexBarProviderAccount.fromTokenAccount(
+            oauthAccount,
+            existingID: oauthAccount.accountId
+        )
+        try self.writeConfig(self.makeRoutingConfig(storedOAuthAccount))
+
+        let syncService = RoutingProbeSyncService()
+        let runtimeController = RuntimeControllerSpy()
+        runtimeController.nextApplyResult = false
+        runtimeController.nextAdoptResult = true
+        var probeCallCount = 0
+        let store = TokenStore(
+            configStore: CodexBarConfigStore(),
+            syncService: syncService,
+            openRouterGatewayService: OpenRouterGatewayControllerSpy(),
+            apiServiceRuntimeController: { runtimeController },
+            apiServiceRoutingProbeAction: { _ in
+                probeCallCount += 1
+            },
+            codexRunningProcessIDs: { [] }
+        )
+
+        let message = try await store.enableAPIServiceRoutingFromMenu()
+
+        XCTAssertEqual(message, L.menuAPIServiceRoutingProbeSuccess)
+        XCTAssertTrue(store.config.desktop.cliProxyAPI.enabled)
+        XCTAssertEqual(runtimeController.appliedSettings.count, 1)
+        XCTAssertEqual(runtimeController.adoptRequests.count, 1)
         XCTAssertEqual(probeCallCount, 1)
         XCTAssertEqual(syncService.restoreCallCount, 0)
     }
@@ -112,6 +150,7 @@ final class APIServiceRoutingEnableTests: CodexBarTestCase {
             configStore: CodexBarConfigStore(),
             syncService: syncService,
             openRouterGatewayService: OpenRouterGatewayControllerSpy(),
+            apiServiceRuntimeController: { RuntimeControllerSpy() },
             apiServiceRoutingProbeAction: { _ in
                 probeCallCount += 1
                 throw URLError(.timedOut)
@@ -129,6 +168,59 @@ final class APIServiceRoutingEnableTests: CodexBarTestCase {
         XCTAssertFalse(store.config.desktop.cliProxyAPI.enabled)
         XCTAssertEqual(probeCallCount, 1)
         XCTAssertEqual(syncService.restoreCallCount, 1)
+    }
+
+    func testEnableRoutingRuntimeApplyFailureStaysDirectErrorInsteadOfUnknownProbeFailure() async throws {
+        let oauthAccount = try self.makeOAuthAccount(
+            accountID: "acct-probe-runtime-failure",
+            email: "probe-runtime-failure@example.com"
+        )
+        let storedOAuthAccount = CodexBarProviderAccount.fromTokenAccount(
+            oauthAccount,
+            existingID: oauthAccount.accountId
+        )
+        try self.writeConfig(self.makeRoutingConfig(storedOAuthAccount))
+
+        let syncService = RoutingProbeSyncService()
+        let runtimeController = RuntimeControllerSpy()
+        runtimeController.nextApplyResult = false
+        runtimeController.nextAdoptResult = false
+        let store = TokenStore(
+            configStore: CodexBarConfigStore(),
+            syncService: syncService,
+            openRouterGatewayService: OpenRouterGatewayControllerSpy(),
+            apiServiceRuntimeController: { runtimeController },
+            apiServiceRoutingProbeAction: { _ in
+                XCTFail("Probe should not run when runtime apply fails")
+            },
+            codexRunningProcessIDs: { [] }
+        )
+        store.updateCLIProxyAPIState(
+            CLIProxyAPIServiceState(
+                config: CLIProxyAPIServiceConfig(
+                    host: "127.0.0.1",
+                    port: 8317,
+                    authDirectory: CLIProxyAPIService.authDirectoryURL,
+                    managementSecretKey: "secret",
+                    enabled: false
+                ),
+                status: .failed,
+                lastError: "Management authentication required"
+            )
+        )
+
+        do {
+            _ = try await store.enableAPIServiceRoutingFromMenu()
+            XCTFail("Expected runtime apply failure")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "Management authentication required")
+            XCTAssertFalse(error.localizedDescription.contains("unknown_probe_failure"))
+            XCTAssertFalse(error.localizedDescription.contains("Routing probe failed"))
+        }
+
+        XCTAssertEqual(runtimeController.adoptRequests.count, 1)
+        XCTAssertEqual(syncService.restoreCallCount, 1)
+        XCTAssertFalse(store.config.desktop.cliProxyAPI.enabled)
     }
 
     func testEnableRoutingWritesCodexkitManagedConfigBeforeProbeAndRefreshesPreAPISnapshotOnlyAfterSuccess() async throws {
@@ -160,6 +252,7 @@ final class APIServiceRoutingEnableTests: CodexBarTestCase {
             configStore: CodexBarConfigStore(),
             syncService: CodexSyncService(),
             openRouterGatewayService: OpenRouterGatewayControllerSpy(),
+            apiServiceRuntimeController: { RuntimeControllerSpy() },
             apiServiceRoutingProbeAction: { config in
                 enabledBeforeCommit = store.config.desktop.cliProxyAPI.enabled
                 let authObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: CodexPaths.authURL)) as? [String: Any])
@@ -218,6 +311,7 @@ final class APIServiceRoutingEnableTests: CodexBarTestCase {
             configStore: CodexBarConfigStore(),
             syncService: CodexSyncService(),
             openRouterGatewayService: OpenRouterGatewayControllerSpy(),
+            apiServiceRuntimeController: { RuntimeControllerSpy() },
             apiServiceRoutingProbeAction: { config in
                 let authObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: CodexPaths.authURL)) as? [String: Any])
                 XCTAssertEqual(authObject["auth_mode"] as? String, "apikey")
@@ -282,6 +376,7 @@ final class APIServiceRoutingEnableTests: CodexBarTestCase {
             configStore: CodexBarConfigStore(),
             syncService: CodexSyncService(),
             openRouterGatewayService: OpenRouterGatewayControllerSpy(),
+            apiServiceRuntimeController: { RuntimeControllerSpy() },
             apiServiceRoutingProbeAction: { _ in },
             codexRunningProcessIDs: { [] }
         )
@@ -294,7 +389,7 @@ final class APIServiceRoutingEnableTests: CodexBarTestCase {
         XCTAssertEqual(store.config.active.providerId, "openai-oauth")
         XCTAssertEqual(store.config.active.accountId, storedOAuthAccount.id)
 
-        try store.setAPIServiceRoutingEnabledFromMenu(false)
+        try await store.setAPIServiceRoutingEnabledFromMenu(false)
 
         XCTAssertFalse(store.config.desktop.cliProxyAPI.enabled)
         XCTAssertEqual(store.config.active.providerId, compatible.provider.id)
@@ -322,6 +417,29 @@ private final class OpenRouterGatewayControllerSpy: OpenRouterGatewayControlling
     func startIfNeeded() {}
     func stop() {}
     func updateState(provider _: CodexBarProvider?, isActiveProvider _: Bool) {}
+}
+
+@MainActor
+private final class RuntimeControllerSpy: CLIProxyAPIRuntimeControlling {
+    var nextApplyResult = true
+    var nextAdoptResult = false
+    var appliedSettings: [CodexBarDesktopSettings.CLIProxyAPISettings] = []
+    var adoptRequests: [CodexBarDesktopSettings.CLIProxyAPISettings] = []
+
+    @discardableResult
+    func applyConfiguration(_ settings: CodexBarDesktopSettings.CLIProxyAPISettings) -> Bool {
+        self.appliedSettings.append(settings)
+        return self.nextApplyResult
+    }
+
+    func adoptRunningServiceIfReusable(_ settings: CodexBarDesktopSettings.CLIProxyAPISettings) async -> Bool {
+        self.adoptRequests.append(settings)
+        return self.nextAdoptResult
+    }
+
+    func stop() {}
+
+    func reconfigureIfRunning(_ settings: CodexBarDesktopSettings.CLIProxyAPISettings) {}
 }
 
 private extension APIServiceRoutingEnableTests {

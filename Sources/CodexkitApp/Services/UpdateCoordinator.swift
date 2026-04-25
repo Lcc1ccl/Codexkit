@@ -71,9 +71,24 @@ protocol AppUpdateActionExecuting {
     func execute(_ availability: AppUpdateAvailability) async throws
 }
 
+enum CLIProxyAPIArtifactFormat: String, Equatable {
+    case tarGzip
+    case zip
+    case executable
+}
+
+struct CLIProxyAPIReleaseArtifact: Equatable {
+    var name: String
+    var downloadURL: URL
+    var architecture: UpdateArtifactArchitecture
+    var format: CLIProxyAPIArtifactFormat
+    var sha256: String?
+}
+
 struct CLIProxyAPIUpdateRelease: Equatable {
     var version: String
     var releasePageURL: URL
+    var artifact: CLIProxyAPIReleaseArtifact? = nil
 }
 
 struct CLIProxyAPIUpdateAvailability: Equatable {
@@ -194,6 +209,12 @@ struct LocalCLIProxyAPIInstalledVersionProvider: CLIProxyAPIInstalledVersionProv
     var service: CLIProxyAPIService = .shared
 
     func resolveInstalledVersion() -> String {
+        if let version = self.service.resolveManagedRuntimeDescriptor()?.version
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            version.isEmpty == false {
+            return version
+        }
+
         if let descriptor = self.service.resolveBundledRuntimeDescriptor(),
            let version = descriptor.version?.trimmingCharacters(in: .whitespacesAndNewlines),
            version.isEmpty == false {
@@ -225,16 +246,109 @@ struct LocalCLIProxyAPIInstalledVersionProvider: CLIProxyAPIInstalledVersionProv
     }
 }
 
+enum CLIProxyAPIReleaseArtifactSelector {
+    static func artifact(
+        from asset: GitHubReleaseAsset
+    ) -> CLIProxyAPIReleaseArtifact? {
+        let normalizedName = asset.name.lowercased()
+        guard normalizedName.contains("darwin") || normalizedName.contains("macos") else {
+            return nil
+        }
+        guard let format = Self.inferFormat(from: normalizedName) else {
+            return nil
+        }
+
+        return CLIProxyAPIReleaseArtifact(
+            name: asset.name,
+            downloadURL: asset.browserDownloadURL,
+            architecture: Self.inferArchitecture(from: normalizedName),
+            format: format,
+            sha256: Self.normalizeDigest(asset.digest)
+        )
+    }
+
+    static func selectArtifact(
+        for architecture: UpdateArtifactArchitecture,
+        artifacts: [CLIProxyAPIReleaseArtifact]
+    ) throws -> CLIProxyAPIReleaseArtifact {
+        let architecturePreference: [UpdateArtifactArchitecture]
+        switch architecture {
+        case .arm64:
+            architecturePreference = [.arm64, .universal]
+        case .x86_64:
+            architecturePreference = [.x86_64, .universal]
+        case .universal:
+            architecturePreference = [.universal, .arm64, .x86_64]
+        }
+
+        let formatPreference: [CLIProxyAPIArtifactFormat] = [.tarGzip, .zip, .executable]
+
+        for preferredFormat in formatPreference {
+            for preferredArchitecture in architecturePreference {
+                if let artifact = artifacts.first(where: {
+                    $0.architecture == preferredArchitecture && $0.format == preferredFormat
+                }) {
+                    return artifact
+                }
+            }
+        }
+
+        throw AppUpdateError.noCompatibleArtifact(architecture)
+    }
+
+    private static func inferFormat(from normalizedName: String) -> CLIProxyAPIArtifactFormat? {
+        if normalizedName.hasSuffix(".tar.gz") || normalizedName.hasSuffix(".tgz") {
+            return .tarGzip
+        }
+        if normalizedName.hasSuffix(".zip") {
+            return .zip
+        }
+        if normalizedName.hasSuffix("/cli-proxy-api") || normalizedName == "cli-proxy-api" {
+            return .executable
+        }
+        return nil
+    }
+
+    private static func inferArchitecture(from normalizedName: String) -> UpdateArtifactArchitecture {
+        if normalizedName.contains("x86_64")
+            || normalizedName.contains("x64")
+            || normalizedName.contains("amd64")
+            || normalizedName.contains("intel") {
+            return .x86_64
+        }
+        if normalizedName.contains("arm64")
+            || normalizedName.contains("aarch64")
+            || normalizedName.contains("apple-silicon") {
+            return .arm64
+        }
+        return .universal
+    }
+
+    private static func normalizeDigest(_ digest: String?) -> String? {
+        guard let trimmed = digest?.trimmingCharacters(in: .whitespacesAndNewlines),
+              trimmed.isEmpty == false else {
+            return nil
+        }
+        guard trimmed.hasPrefix("sha256:") else {
+            return nil
+        }
+        return String(trimmed.dropFirst("sha256:".count))
+    }
+}
+
 struct LiveCLIProxyAPIReleaseLoader: CLIProxyAPIReleaseLoading {
     var session: URLSession = .shared
+    var architecture: UpdateArtifactArchitecture = LiveAppUpdateEnvironment().architecture
 
     private struct ReleaseInfo: Decodable {
         var tagName: String
         var htmlURL: URL?
+        var assets: [GitHubReleaseAsset]?
 
         enum CodingKeys: String, CodingKey {
             case tagName = "tag_name"
             case htmlURL = "html_url"
+            case assets
         }
     }
 
@@ -263,9 +377,16 @@ struct LiveCLIProxyAPIReleaseLoader: CLIProxyAPIReleaseLoading {
             throw AppUpdateError.invalidResponse
         }
 
+        let artifacts = (releaseInfo.assets ?? []).compactMap(CLIProxyAPIReleaseArtifactSelector.artifact(from:))
+        let selectedArtifact = try? CLIProxyAPIReleaseArtifactSelector.selectArtifact(
+            for: self.architecture,
+            artifacts: artifacts
+        )
+
         return CLIProxyAPIUpdateRelease(
             version: version,
-            releasePageURL: releaseInfo.htmlURL ?? hardcodedCLIProxyAPIReleasePageURL
+            releasePageURL: releaseInfo.htmlURL ?? hardcodedCLIProxyAPIReleasePageURL,
+            artifact: selectedArtifact
         )
     }
 }
@@ -496,10 +617,16 @@ struct LiveAppUpdateActionExecutor: AppUpdateActionExecuting {
 }
 
 struct LiveCLIProxyAPIUpdateActionExecutor: CLIProxyAPIUpdateActionExecuting {
+    var service: CLIProxyAPIService = .shared
+
     func execute(_ availability: CLIProxyAPIUpdateAvailability) async throws {
-        guard NSWorkspace.shared.open(availability.release.releasePageURL) else {
-            throw AppUpdateError.failedToOpenDownloadURL(availability.release.releasePageURL)
+        guard let artifact = availability.release.artifact else {
+            throw AppUpdateError.noCompatibleArtifact(LiveAppUpdateEnvironment().architecture)
         }
+        _ = try await self.service.installManagedRuntime(
+            version: availability.release.version,
+            artifact: artifact
+        )
     }
 }
 

@@ -1,6 +1,15 @@
 import Foundation
 
 @MainActor
+protocol CLIProxyAPIRuntimeControlling {
+    @discardableResult
+    func applyConfiguration(_ settings: CodexBarDesktopSettings.CLIProxyAPISettings) -> Bool
+    func adoptRunningServiceIfReusable(_ settings: CodexBarDesktopSettings.CLIProxyAPISettings) async -> Bool
+    func stop()
+    func reconfigureIfRunning(_ settings: CodexBarDesktopSettings.CLIProxyAPISettings)
+}
+
+@MainActor
 final class CLIProxyAPIRuntimeController: LifecycleControlling {
     static let shared = CLIProxyAPIRuntimeController()
     private nonisolated static let skipRuntimeEnvironmentKey = "CODEXKIT_SKIP_CLIPROXYAPI_RUNTIME"
@@ -35,7 +44,13 @@ final class CLIProxyAPIRuntimeController: LifecycleControlling {
         self.monitorTask = nil
         self.quotaRefreshTask?.cancel()
         self.quotaRefreshTask = nil
-        guard let process = self.process else { return }
+        guard let process = self.process else {
+            if self.appliedSettings != nil {
+                self.updateState(status: .stopped, lastError: nil, pid: nil)
+                self.appliedSettings = nil
+            }
+            return
+        }
         if process.isRunning {
             process.terminate()
         }
@@ -48,25 +63,9 @@ final class CLIProxyAPIRuntimeController: LifecycleControlling {
         self.appliedSettings = nil
     }
 
-    func applyConfiguration(_ settings: CodexBarDesktopSettings.CLIProxyAPISettings) {
-        let managementSecretKey = settings.managementSecretKey ?? self.service.generateManagementSecretKey()
-        let nextConfig = CLIProxyAPIServiceConfig(
-            host: settings.host,
-            port: settings.port,
-            authDirectory: CLIProxyAPIService.authDirectoryURL,
-            managementSecretKey: managementSecretKey,
-            clientAPIKey: settings.clientAPIKey ?? self.service.generateDistinctClientAPIKey(
-                managementSecretKey: managementSecretKey
-            ),
-            allowRemoteManagement: false,
-            enabled: settings.enabled,
-            routingStrategy: settings.routingStrategy,
-            switchProjectOnQuotaExceeded: settings.switchProjectOnQuotaExceeded,
-            switchPreviewModelOnQuotaExceeded: settings.switchPreviewModelOnQuotaExceeded,
-            requestRetry: settings.requestRetry,
-            maxRetryInterval: settings.maxRetryInterval,
-            disableCooling: settings.disableCooling
-        )
+    @discardableResult
+    func applyConfiguration(_ settings: CodexBarDesktopSettings.CLIProxyAPISettings) -> Bool {
+        let nextConfig = self.makeServiceConfig(from: settings)
         if Self.shouldSkipRuntimeLaunch() {
             self.monitorTask?.cancel()
             self.monitorTask = nil
@@ -75,8 +74,9 @@ final class CLIProxyAPIRuntimeController: LifecycleControlling {
             self.process = nil
             self.appliedSettings = settings
             self.updateState(status: .stopped, lastError: nil, pid: nil, config: nextConfig)
-            return
+            return true
         }
+
         if Self.shouldRestartProcess(
             isRunning: self.process?.isRunning == true,
             appliedSettings: self.appliedSettings,
@@ -84,20 +84,34 @@ final class CLIProxyAPIRuntimeController: LifecycleControlling {
         ) {
             self.stop()
         } else if self.process?.isRunning == true {
-            self.updateState(
-                status: .running,
-                lastError: nil,
-                pid: self.process?.processIdentifier,
-                config: nextConfig
-            )
-            return
+            do {
+                _ = try self.service.writeConfig(nextConfig)
+                self.appliedSettings = settings
+                self.updateState(
+                    status: .running,
+                    lastError: nil,
+                    pid: self.process?.processIdentifier,
+                    config: nextConfig
+                )
+                return true
+            } catch {
+                self.updateState(
+                    status: .failed,
+                    lastError: error.localizedDescription,
+                    pid: self.process?.processIdentifier,
+                    config: nextConfig
+                )
+                return false
+            }
         }
 
         let repoRoot = self.service.resolveBundledRepoRoot()
-        guard self.service.hasBundledRuntime(searchRoots: repoRoot.map { [$0] }) || self.service.hasBundledRuntime() else {
+        guard self.service.hasManagedRuntime()
+            || self.service.hasBundledRuntime(searchRoots: repoRoot.map { [$0] })
+            || self.service.hasBundledRuntime() else {
             self.updateState(
                 status: .failed,
-                lastError: "Missing bundled CLIProxyAPI runtime",
+                lastError: "Missing managed or bundled CLIProxyAPI runtime",
                 pid: nil,
                 config: nextConfig
             )
@@ -105,7 +119,7 @@ final class CLIProxyAPIRuntimeController: LifecycleControlling {
                 type: "cliproxyapi_start_skipped_missing_bundled_runtime",
                 fields: ["port": settings.port]
             )
-            return
+            return false
         }
         let config = nextConfig
 
@@ -117,7 +131,7 @@ final class CLIProxyAPIRuntimeController: LifecycleControlling {
                 pid: nil,
                 config: nextConfig
             )
-            return
+            return false
         }
 
         guard self.service.canBindTCPPort(host: config.host, port: config.port) else {
@@ -127,7 +141,7 @@ final class CLIProxyAPIRuntimeController: LifecycleControlling {
                 pid: nil,
                 config: nextConfig
             )
-            return
+            return false
         }
 
         self.updateState(status: .starting, lastError: nil, pid: nil, config: nextConfig)
@@ -175,12 +189,47 @@ final class CLIProxyAPIRuntimeController: LifecycleControlling {
                 type: "cliproxyapi_started",
                 fields: ["pid": process.processIdentifier, "port": config.port]
             )
+            return true
         } catch {
             self.updateState(status: .failed, lastError: error.localizedDescription, pid: nil, config: config)
             AppLifecycleDiagnostics.shared.recordEvent(
                 type: "cliproxyapi_start_failed",
                 fields: ["port": config.port, "error": error.localizedDescription]
             )
+            return false
+        }
+    }
+
+    func adoptRunningServiceIfReusable(_ settings: CodexBarDesktopSettings.CLIProxyAPISettings) async -> Bool {
+        let config = self.makeServiceConfig(from: settings)
+        do {
+            let healthy = try await self.service.checkHealth(config: config)
+            guard healthy else {
+                self.updateState(status: .failed, lastError: "Health check failed", pid: nil, config: config)
+                return false
+            }
+
+            let remoteConfig = try await self.managementService.getConfig(config: config)
+            let runtimeConfig = self.managementService.makeRuntimeConfiguration(
+                response: remoteConfig,
+                fallback: config
+            )
+            self.monitorTask?.cancel()
+            self.monitorTask = nil
+            self.quotaRefreshTask?.cancel()
+            self.quotaRefreshTask = nil
+            self.process = nil
+            self.appliedSettings = settings
+            self.updateState(status: .running, lastError: nil, pid: nil, config: runtimeConfig)
+            return true
+        } catch {
+            self.updateState(
+                status: .failed,
+                lastError: self.classifyError(error),
+                pid: nil,
+                config: config
+            )
+            return false
         }
     }
 
@@ -499,6 +548,15 @@ final class CLIProxyAPIRuntimeController: LifecycleControlling {
     }
 
     private func classifyError(_ error: Error) -> String {
+        if let managementError = error as? CLIProxyAPIManagementServiceError {
+            switch managementError {
+            case let .server(statusCode, message):
+                if statusCode == 401 || statusCode == 403 {
+                    return "Management authentication required"
+                }
+                return message
+            }
+        }
         if let urlError = error as? URLError {
             switch urlError.code {
             case .cannotConnectToHost:
@@ -547,4 +605,36 @@ final class CLIProxyAPIRuntimeController: LifecycleControlling {
             return false
         }
     }
+
+    private func makeServiceConfig(
+        from settings: CodexBarDesktopSettings.CLIProxyAPISettings
+    ) -> CLIProxyAPIServiceConfig {
+        let managementSecretKey = settings.managementSecretKey ?? self.service.generateManagementSecretKey()
+        return CLIProxyAPIServiceConfig(
+            host: settings.host,
+            port: settings.port,
+            authDirectory: CLIProxyAPIService.authDirectoryURL,
+            managementSecretKey: managementSecretKey,
+            clientAPIKey: settings.clientAPIKey ?? self.service.generateDistinctClientAPIKey(
+                managementSecretKey: managementSecretKey
+            ),
+            allowRemoteManagement: false,
+            enabled: settings.enabled,
+            routingStrategy: settings.routingStrategy,
+            switchProjectOnQuotaExceeded: settings.switchProjectOnQuotaExceeded,
+            switchPreviewModelOnQuotaExceeded: settings.switchPreviewModelOnQuotaExceeded,
+            requestRetry: settings.requestRetry,
+            maxRetryInterval: settings.maxRetryInterval,
+            disableCooling: settings.disableCooling
+        )
+    }
 }
+
+extension CLIProxyAPIRuntimeController: CLIProxyAPIRuntimeControlling {}
+
+extension CLIProxyAPIRuntimeControlling {
+    func adoptRunningServiceIfReusable(_ settings: CodexBarDesktopSettings.CLIProxyAPISettings) async -> Bool {
+        false
+    }
+}
+

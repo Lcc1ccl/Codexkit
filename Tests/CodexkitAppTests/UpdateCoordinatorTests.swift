@@ -267,6 +267,127 @@ final class UpdateCoordinatorTests: CodexBarTestCase {
         XCTAssertEqual(provider.resolveInstalledVersion(), "v9.9.9")
     }
 
+    func testLocalCLIProxyAPIInstalledVersionProviderPrefersManagedActiveVersion() throws {
+        let service = CLIProxyAPIService()
+        let executable = CLIProxyAPIService.managedVersionsDirectoryURL
+            .appendingPathComponent("v10.0.0", isDirectory: true)
+            .appendingPathComponent("cli-proxy-api")
+        try self.writeExecutable(at: executable)
+        try service.writeManagedRuntimeDescriptor(
+            CLIProxyAPIService.ManagedRuntimeDescriptor(
+                version: "v10.0.0",
+                executableRelativePath: "versions/v10.0.0/cli-proxy-api",
+                artifactName: nil,
+                downloadURL: nil,
+                installedAt: nil,
+                previousVersion: nil,
+                previousExecutableRelativePath: nil
+            )
+        )
+        let provider = LocalCLIProxyAPIInstalledVersionProvider(service: service)
+
+        XCTAssertEqual(provider.resolveInstalledVersion(), "v10.0.0")
+    }
+
+    func testCLIProxyAPIReleaseLoaderSelectsCompatibleDarwinTarballArtifact() async throws {
+        let releasesURL = URL(string: "https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest")!
+        let session = self.makeMockSession()
+        MockURLProtocol.handler = { request in
+            XCTAssertEqual(request.url, releasesURL)
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/vnd.github+json")
+
+            let body = """
+            {
+              "tag_name": "v6.9.37",
+              "html_url": "https://github.com/router-for-me/CLIProxyAPI/releases/tag/v6.9.37",
+              "assets": [
+                {
+                  "name": "CLIProxyAPI_6.9.37_linux_arm64.tar.gz",
+                  "browser_download_url": "https://example.com/linux-arm64.tar.gz"
+                },
+                {
+                  "name": "CLIProxyAPI_6.9.37_darwin_amd64.tar.gz",
+                  "browser_download_url": "https://example.com/darwin-amd64.tar.gz",
+                  "digest": "sha256:aaa111"
+                },
+                {
+                  "name": "CLIProxyAPI_6.9.37_darwin_arm64.tar.gz",
+                  "browser_download_url": "https://example.com/darwin-arm64.tar.gz",
+                  "digest": "sha256:bbb222"
+                }
+              ]
+            }
+            """
+
+            return (
+                HTTPURLResponse(url: releasesURL, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                Data(body.utf8)
+            )
+        }
+
+        let release = try await LiveCLIProxyAPIReleaseLoader(
+            session: session,
+            architecture: .arm64
+        ).loadLatestRelease()
+
+        XCTAssertEqual(release.version, "v6.9.37")
+        XCTAssertEqual(release.artifact?.name, "CLIProxyAPI_6.9.37_darwin_arm64.tar.gz")
+        XCTAssertEqual(release.artifact?.format, .tarGzip)
+        XCTAssertEqual(release.artifact?.architecture, .arm64)
+        XCTAssertEqual(release.artifact?.sha256, "bbb222")
+    }
+
+    func testCLIProxyAPIUpdateExecutorInstallsTarballIntoManagedRuntime() async throws {
+        let artifactURL = URL(string: "https://example.com/CLIProxyAPI_10.0.1_darwin_arm64.tar.gz")!
+        let tarballData = try self.makeCLIProxyAPITarball()
+        let session = self.makeMockSession()
+        MockURLProtocol.handler = { request in
+            XCTAssertEqual(request.url, artifactURL)
+            return (
+                HTTPURLResponse(url: artifactURL, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                tarballData
+            )
+        }
+        let service = CLIProxyAPIService(session: session)
+        let executor = LiveCLIProxyAPIUpdateActionExecutor(service: service)
+        let release = CLIProxyAPIUpdateRelease(
+            version: "v10.0.1",
+            releasePageURL: URL(string: "https://example.com/releases/v10.0.1")!,
+            artifact: CLIProxyAPIReleaseArtifact(
+                name: "CLIProxyAPI_10.0.1_darwin_arm64.tar.gz",
+                downloadURL: artifactURL,
+                architecture: .arm64,
+                format: .tarGzip,
+                sha256: nil
+            )
+        )
+        let availability = CLIProxyAPIUpdateAvailability(
+            installedVersion: "v10.0.0",
+            release: release
+        )
+
+        try await executor.execute(availability)
+
+        let descriptor = try XCTUnwrap(service.resolveManagedRuntimeDescriptor())
+        XCTAssertEqual(descriptor.version, "v10.0.1")
+        XCTAssertEqual(descriptor.artifactName, "CLIProxyAPI_10.0.1_darwin_arm64.tar.gz")
+        XCTAssertEqual(descriptor.previousVersion, nil)
+        XCTAssertTrue(descriptor.executableRelativePath.hasPrefix("versions/"))
+        XCTAssertEqual(service.managedExecutableURL()?.lastPathComponent, "cli-proxy-api")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: service.managedExecutableURL()?.path ?? ""))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: CLIProxyAPIService.activeManagedVersionURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: CLIProxyAPIService.logsDirectoryURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: CLIProxyAPIService.staticDirectoryURL.path))
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: CLIProxyAPIService.managedDownloadsDirectoryURL
+                    .appendingPathComponent("v10.0.1", isDirectory: true)
+                    .appendingPathComponent("CLIProxyAPI_10.0.1_darwin_arm64.tar.gz")
+                    .path
+            )
+        )
+    }
+
     func testManualCheckShowsUpToDateStateWhenVersionsMatch() async {
         let coordinator = UpdateCoordinator(
             releaseLoader: MockReleaseLoader(release: self.makeRelease(version: "1.1.5")),
@@ -625,6 +746,37 @@ final class UpdateCoordinatorTests: CodexBarTestCase {
         artifacts: [AppUpdateArtifact]? = nil
     ) -> AppUpdateRelease {
         self.makeFeed(version: version, artifacts: artifacts).release
+    }
+
+    private func writeExecutable(at url: URL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: url)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: Int16(0o755))],
+            ofItemAtPath: url.path
+        )
+    }
+
+    private func makeCLIProxyAPITarball() throws -> Data {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let payloadRoot = root.appendingPathComponent("payload", isDirectory: true)
+        let archiveURL = root.appendingPathComponent("cpa.tar.gz")
+        try self.writeExecutable(at: payloadRoot.appendingPathComponent("cli-proxy-api"))
+        try Data("fixture".utf8).write(to: payloadRoot.appendingPathComponent("README.md"))
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+        process.arguments = ["-czf", archiveURL.path, "-C", payloadRoot.path, "."]
+        let errorPipe = Pipe()
+        process.standardError = errorPipe
+        try process.run()
+        process.waitUntilExit()
+        if process.terminationStatus != 0 {
+            let data = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            XCTFail(String(data: data, encoding: .utf8) ?? "tar failed")
+        }
+        return try Data(contentsOf: archiveURL)
     }
 }
 

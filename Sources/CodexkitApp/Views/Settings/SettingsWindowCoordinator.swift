@@ -44,6 +44,7 @@ struct SettingsWindowDraft: Equatable {
     var cliProxyAPIHost: String
     var cliProxyAPIPort: Int
     var cliProxyAPIManagementSecretKey: String
+    var cliProxyAPIClientAPIKey: String
     var cliProxyAPIMemberAccountIDs: [String]
     var cliProxyAPIRestrictFreeAccounts: Bool
     var cliProxyAPIRoutingStrategy: CLIProxyAPIRoutingStrategy
@@ -86,6 +87,7 @@ struct SettingsWindowDraft: Equatable {
         self.cliProxyAPIHost = cliProxyDefaults.host
         self.cliProxyAPIPort = cliProxyDefaults.port
         self.cliProxyAPIManagementSecretKey = cliProxyDefaults.managementSecretKey
+        self.cliProxyAPIClientAPIKey = cliProxyDefaults.clientAPIKey
         self.cliProxyAPIMemberAccountIDs = config.desktop.cliProxyAPI.memberAccountIDs
         self.cliProxyAPIRestrictFreeAccounts = config.desktop.cliProxyAPI.restrictFreeAccounts
         self.cliProxyAPIRoutingStrategy = cliProxyDefaults.routingStrategy
@@ -156,6 +158,7 @@ enum SettingsDirtyField: Hashable {
     case cliProxyAPIHost
     case cliProxyAPIPort
     case cliProxyAPIManagementSecretKey
+    case cliProxyAPIClientAPIKey
     case cliProxyAPIMemberAccountIDs
     case cliProxyAPIRestrictFreeAccounts
     case cliProxyAPIRoutingStrategy
@@ -339,6 +342,67 @@ final class SettingsWindowCoordinator: ObservableObject {
         self.validationMessage = nil
     }
 
+    func commitChanges(on page: SettingsPage) {
+        self.commitChanges(fields: Self.fields(for: page))
+    }
+
+    func revertDraftField(_ field: SettingsDirtyField) {
+        self.syncDraft(to: self.baseline, fields: [field])
+        self.dirtyFields.remove(field)
+    }
+
+    func makeAPIServiceActionRequest(clientAPIKey: String?, enabled: Bool) -> CLIProxyAPISettingsUpdate {
+        let draftClientAPIKey = self.draft.cliProxyAPIClientAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        return CLIProxyAPISettingsUpdate(
+            enabled: enabled,
+            host: self.draft.cliProxyAPIHost,
+            port: self.draft.cliProxyAPIPort,
+            repositoryRootPath: nil,
+            managementSecretKey: self.draft.cliProxyAPIManagementSecretKey,
+            clientAPIKey: draftClientAPIKey.isEmpty ? clientAPIKey : draftClientAPIKey,
+            memberAccountIDs: self.draft.cliProxyAPIMemberAccountIDs,
+            restrictFreeAccounts: self.draft.cliProxyAPIRestrictFreeAccounts,
+            routingStrategy: self.draft.cliProxyAPIRoutingStrategy,
+            switchProjectOnQuotaExceeded: self.draft.cliProxyAPISwitchProjectOnQuotaExceeded,
+            switchPreviewModelOnQuotaExceeded: self.draft.cliProxyAPISwitchPreviewModelOnQuotaExceeded,
+            requestRetry: self.draft.cliProxyAPIRequestRetry,
+            maxRetryInterval: self.draft.cliProxyAPIMaxRetryInterval,
+            disableCooling: self.draft.cliProxyAPIDisableCooling,
+            memberPrioritiesByAccountID: self.draft.cliProxyAPIMemberPrioritiesByAccountID
+        )
+    }
+
+    func makeAPIServiceRuntimeActionRequest(clientAPIKey: String?, persistedEnabled: Bool) -> CLIProxyAPISettingsUpdate {
+        self.makeAPIServiceActionRequest(clientAPIKey: clientAPIKey, enabled: persistedEnabled)
+    }
+
+    func apiServiceRoutingEnablePreflightMessage(runtimeState: CLIProxyAPIServiceState) -> String? {
+        if self.draft.cliProxyAPIMemberAccountIDs.isEmpty {
+            return L.menuAPIServiceSetupRequiredMessage
+        }
+        if runtimeState.status != .running {
+            return L.menuAPIServiceStartRequiredMessage
+        }
+        return nil
+    }
+
+    func completeAPIServiceAction() {
+        self.commitChanges(on: .apiService)
+    }
+
+    func completeAPIServiceRuntimeStartAction() {
+        self.commitChanges(fields: Self.apiServiceRuntimeActionFields)
+    }
+
+    func failAPIServiceAction(_ message: String) {
+        self.validationMessage = message
+    }
+
+    func rollbackAPIServiceEnabledAction(_ message: String) {
+        self.revertDraftField(.cliProxyAPIEnabled)
+        self.validationMessage = message
+    }
+
     func confirmPendingActionSave(
         using sink: SettingsSaveRequestApplying,
         onClose: () -> Void
@@ -397,6 +461,7 @@ final class SettingsWindowCoordinator: ObservableObject {
         self.reconcile(\.cliProxyAPIHost, externalValue: externalDraft.cliProxyAPIHost, field: .cliProxyAPIHost)
         self.reconcile(\.cliProxyAPIPort, externalValue: externalDraft.cliProxyAPIPort, field: .cliProxyAPIPort)
         self.reconcile(\.cliProxyAPIManagementSecretKey, externalValue: externalDraft.cliProxyAPIManagementSecretKey, field: .cliProxyAPIManagementSecretKey)
+        self.reconcile(\.cliProxyAPIClientAPIKey, externalValue: externalDraft.cliProxyAPIClientAPIKey, field: .cliProxyAPIClientAPIKey)
         self.reconcile(\.cliProxyAPIMemberAccountIDs, externalValue: externalDraft.cliProxyAPIMemberAccountIDs, field: .cliProxyAPIMemberAccountIDs)
         self.reconcile(\.cliProxyAPIRestrictFreeAccounts, externalValue: externalDraft.cliProxyAPIRestrictFreeAccounts, field: .cliProxyAPIRestrictFreeAccounts)
         self.reconcile(\.cliProxyAPIRoutingStrategy, externalValue: externalDraft.cliProxyAPIRoutingStrategy, field: .cliProxyAPIRoutingStrategy)
@@ -488,6 +553,7 @@ final class SettingsWindowCoordinator: ObservableObject {
             self.draft.cliProxyAPIHost != self.baseline.cliProxyAPIHost ||
            self.draft.cliProxyAPIPort != self.baseline.cliProxyAPIPort ||
             self.draft.cliProxyAPIManagementSecretKey != self.baseline.cliProxyAPIManagementSecretKey ||
+            self.draft.cliProxyAPIClientAPIKey != self.baseline.cliProxyAPIClientAPIKey ||
             self.draft.cliProxyAPIMemberAccountIDs != self.baseline.cliProxyAPIMemberAccountIDs ||
             self.draft.cliProxyAPIRestrictFreeAccounts != self.baseline.cliProxyAPIRestrictFreeAccounts ||
             self.draft.cliProxyAPIRoutingStrategy != self.baseline.cliProxyAPIRoutingStrategy ||
@@ -503,6 +569,7 @@ final class SettingsWindowCoordinator: ObservableObject {
                 port: self.draft.cliProxyAPIPort,
                 repositoryRootPath: nil,
                 managementSecretKey: self.draft.cliProxyAPIManagementSecretKey,
+                clientAPIKey: self.draft.cliProxyAPIClientAPIKey,
                 memberAccountIDs: self.sanitizedCLIProxyAPIMemberAccountIDs(),
                 restrictFreeAccounts: self.draft.cliProxyAPIRestrictFreeAccounts,
                 routingStrategy: self.draft.cliProxyAPIRoutingStrategy,
@@ -622,6 +689,7 @@ final class SettingsWindowCoordinator: ObservableObject {
                 .cliProxyAPIHost,
                 .cliProxyAPIPort,
                 .cliProxyAPIManagementSecretKey,
+                .cliProxyAPIClientAPIKey,
                 .cliProxyAPIMemberAccountIDs,
                 .cliProxyAPIRestrictFreeAccounts,
                 .cliProxyAPIRoutingStrategy,
@@ -644,6 +712,16 @@ final class SettingsWindowCoordinator: ObservableObject {
                 .cliProxyAPIUpdateCheckSchedule,
             ]
         }
+    }
+
+    private static var apiServiceRuntimeActionFields: Set<SettingsDirtyField> {
+        Self.fields(for: .apiService).subtracting([.cliProxyAPIEnabled])
+    }
+
+    private func commitChanges(fields: Set<SettingsDirtyField>) {
+        self.syncBaseline(to: self.draft, fields: fields)
+        self.dirtyFields.subtract(fields)
+        self.validationMessage = nil
     }
 
     private static func merge(_ source: SettingsSaveRequests, into destination: inout SettingsSaveRequests) {
@@ -737,6 +815,9 @@ final class SettingsWindowCoordinator: ObservableObject {
         }
         if fields.contains(.cliProxyAPIManagementSecretKey) {
             self.baseline.cliProxyAPIManagementSecretKey = source.cliProxyAPIManagementSecretKey
+        }
+        if fields.contains(.cliProxyAPIClientAPIKey) {
+            self.baseline.cliProxyAPIClientAPIKey = source.cliProxyAPIClientAPIKey
         }
         if fields.contains(.cliProxyAPIMemberAccountIDs) {
             self.baseline.cliProxyAPIMemberAccountIDs = source.cliProxyAPIMemberAccountIDs
@@ -836,6 +917,9 @@ final class SettingsWindowCoordinator: ObservableObject {
         }
         if fields.contains(.cliProxyAPIManagementSecretKey) {
             self.draft.cliProxyAPIManagementSecretKey = source.cliProxyAPIManagementSecretKey
+        }
+        if fields.contains(.cliProxyAPIClientAPIKey) {
+            self.draft.cliProxyAPIClientAPIKey = source.cliProxyAPIClientAPIKey
         }
         if fields.contains(.cliProxyAPIMemberAccountIDs) {
             self.draft.cliProxyAPIMemberAccountIDs = source.cliProxyAPIMemberAccountIDs

@@ -206,6 +206,21 @@ final class OpenAIAccountPresentationTests: XCTestCase {
         XCTAssertEqual(L.menuAPIServiceStopFirstMessage, "请先停止API服务")
     }
 
+    func testAPIServiceSettingsKeyLabelsUseExplicitClientAPIWording() {
+        XCTAssertEqual(L.settingsAPIServiceClientAPIKey, "Client API Key")
+        XCTAssertEqual(
+            L.settingsAPIServiceClientAPIKeyPlaceholder,
+            "Enter or generate a client API key"
+        )
+        XCTAssertEqual(L.menuAPIServiceKeyLabel, "Management Key")
+
+        L.languageOverride = true
+
+        XCTAssertEqual(L.settingsAPIServiceClientAPIKey, "客户端 API Key")
+        XCTAssertEqual(L.settingsAPIServiceClientAPIKeyPlaceholder, "输入或生成客户端 API Key")
+        XCTAssertEqual(L.menuAPIServiceKeyLabel, "管理密钥")
+    }
+
     func testHeaderAvailabilityBadgeTitleShowsWheneverOpenAIAccountsExist() {
         XCTAssertEqual(
             OpenAIAccountPresentation.headerAvailabilityBadgeTitle(

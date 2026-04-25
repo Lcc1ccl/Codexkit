@@ -1,8 +1,19 @@
+import Foundation
 import XCTest
 @testable import CodexkitApp
 
 @MainActor
 final class CLIProxyAPIRuntimeControllerTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        MockURLProtocol.handler = nil
+    }
+
+    override func tearDown() {
+        MockURLProtocol.handler = nil
+        super.tearDown()
+    }
+
     func testShouldRestartProcessWhenMemberSelectionChanges() {
         let applied = CodexBarDesktopSettings.CLIProxyAPISettings(
             enabled: true,
@@ -197,6 +208,86 @@ final class CLIProxyAPIRuntimeControllerTests: XCTestCase {
 
         XCTAssertFalse(healthy)
         XCTAssertEqual(attempts.value, 1)
+    }
+
+    func testAdoptRunningServiceIfReusableRequiresHealthAndManagementAuth() async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let controller = CLIProxyAPIRuntimeController(
+            service: CLIProxyAPIService(session: session),
+            managementService: CLIProxyAPIManagementService(session: session)
+        )
+        let settings = CodexBarDesktopSettings.CLIProxyAPISettings(
+            enabled: true,
+            host: "127.0.0.1",
+            port: 8411,
+            repositoryRootPath: nil,
+            managementSecretKey: "secret",
+            memberAccountIDs: ["acct-a"]
+        )
+        var requestedPaths: [String] = []
+
+        MockURLProtocol.handler = { request in
+            requestedPaths.append(request.url?.path ?? "")
+            switch request.url?.path {
+            case "/healthz":
+                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(#"{"status":"ok"}"#.utf8))
+            case "/v0/management/config":
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
+                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(#"{"host":"127.0.0.1","port":8411}"#.utf8))
+            default:
+                XCTFail("Unexpected request: \(request.url?.absoluteString ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+
+        let reused = await controller.adoptRunningServiceIfReusable(settings)
+
+        XCTAssertTrue(reused)
+        XCTAssertEqual(requestedPaths, ["/healthz", "/v0/management/config"])
+    }
+
+    func testAdoptRunningServiceIfReusableFailsWhenManagementAuthFails() async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let controller = CLIProxyAPIRuntimeController(
+            service: CLIProxyAPIService(session: session),
+            managementService: CLIProxyAPIManagementService(session: session)
+        )
+        let settings = CodexBarDesktopSettings.CLIProxyAPISettings(
+            enabled: true,
+            host: "127.0.0.1",
+            port: 8412,
+            repositoryRootPath: nil,
+            managementSecretKey: "secret",
+            memberAccountIDs: ["acct-a"]
+        )
+        var requestedPaths: [String] = []
+
+        MockURLProtocol.handler = { request in
+            requestedPaths.append(request.url?.path ?? "")
+            switch request.url?.path {
+            case "/healthz":
+                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(#"{"status":"ok"}"#.utf8))
+            case "/v0/management/config":
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
+                let response = HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!
+                return (response, Data(#"{"message":"unauthorized"}"#.utf8))
+            default:
+                XCTFail("Unexpected request: \(request.url?.absoluteString ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+
+        let reused = await controller.adoptRunningServiceIfReusable(settings)
+
+        XCTAssertFalse(reused)
+        XCTAssertEqual(requestedPaths, ["/healthz", "/v0/management/config"])
     }
 
     func testRuntimeStateDisablesStartWhileProcessIsAlreadyLive() {

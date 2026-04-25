@@ -159,6 +159,9 @@ struct OpenRouterModelCatalogService: OpenRouterModelCatalogFetching {
 
 final class TokenStore: ObservableObject {
     static let shared = TokenStore()
+    private static var apiServiceRuntimeApplyFailureFallback: String {
+        L.zh ? "API服务应用失败" : "Failed to apply API Service runtime"
+    }
 
     @Published var accounts: [TokenAccount] = []
     @Published private(set) var config: CodexBarConfig
@@ -174,6 +177,7 @@ final class TokenStore: ObservableObject {
     private let openRouterModelCatalogService: any OpenRouterModelCatalogFetching
     private let openRouterGatewayLeaseStore: OpenRouterGatewayLeaseStoring
     private let codexRunningProcessIDs: () -> Set<pid_t>
+    private let apiServiceRuntimeController: @MainActor () -> any CLIProxyAPIRuntimeControlling
     private let apiServiceRoutingProbeAction: @MainActor (CLIProxyAPIServiceConfig) async throws -> Void
     private let refreshStateQueue = DispatchQueue(label: "lzl.codexkit.refresh-state")
     private let usageRefreshStateQueue = DispatchQueue(label: "lzl.codexkit.usage-refresh-state")
@@ -192,6 +196,9 @@ final class TokenStore: ObservableObject {
         openRouterGatewayService: OpenRouterGatewayControlling = OpenRouterGatewayService(),
         openRouterModelCatalogService: any OpenRouterModelCatalogFetching = OpenRouterModelCatalogService(),
         openRouterGatewayLeaseStore: OpenRouterGatewayLeaseStoring = OpenRouterGatewayLeaseStore(),
+        apiServiceRuntimeController: @escaping @MainActor () -> any CLIProxyAPIRuntimeControlling = {
+            CLIProxyAPIRuntimeController.shared
+        },
         apiServiceRoutingProbeAction: @escaping @MainActor (CLIProxyAPIServiceConfig) async throws -> Void = { config in
             try await TokenStore.defaultAPIServiceRoutingProbe(config: config)
         },
@@ -205,6 +212,7 @@ final class TokenStore: ObservableObject {
         self.openRouterGatewayService = openRouterGatewayService
         self.openRouterModelCatalogService = openRouterModelCatalogService
         self.openRouterGatewayLeaseStore = openRouterGatewayLeaseStore
+        self.apiServiceRuntimeController = apiServiceRuntimeController
         self.apiServiceRoutingProbeAction = apiServiceRoutingProbeAction
         self.codexRunningProcessIDs = codexRunningProcessIDs
         self.openRouterGatewayLeaseSnapshot = openRouterGatewayLeaseStore.loadLease()
@@ -692,58 +700,95 @@ final class TokenStore: ObservableObject {
         self.syncCLIProxyAPIStateFromConfig()
     }
 
-    func setAPIServiceRoutingEnabledFromMenu(_ enabled: Bool) throws {
-        if enabled == false,
-           self.config.desktop.cliProxyAPI.enabled == false {
-            return
-        }
-
-        if enabled == false {
-            try self.disableAPIServiceRoutingAndRestoreDirect()
-            return
-        }
-
-        let request = CLIProxyAPISettingsUpdate(
-            enabled: enabled,
-            host: self.config.desktop.cliProxyAPI.host,
-            port: self.config.desktop.cliProxyAPI.port,
-            repositoryRootPath: nil,
-            managementSecretKey: self.config.desktop.cliProxyAPI.managementSecretKey,
-            clientAPIKey: self.config.desktop.cliProxyAPI.clientAPIKey,
-            memberAccountIDs: self.config.desktop.cliProxyAPI.memberAccountIDs,
-            restrictFreeAccounts: self.config.desktop.cliProxyAPI.restrictFreeAccounts,
-            routingStrategy: self.config.desktop.cliProxyAPI.routingStrategy,
-            switchProjectOnQuotaExceeded: self.config.desktop.cliProxyAPI.switchProjectOnQuotaExceeded,
-            switchPreviewModelOnQuotaExceeded: self.config.desktop.cliProxyAPI.switchPreviewModelOnQuotaExceeded,
-            requestRetry: self.config.desktop.cliProxyAPI.requestRetry,
-            maxRetryInterval: self.config.desktop.cliProxyAPI.maxRetryInterval,
-            disableCooling: self.config.desktop.cliProxyAPI.disableCooling,
-            memberPrioritiesByAccountID: self.config.desktop.cliProxyAPI.memberPrioritiesByAccountID
-        )
-        try self.saveSettings(SettingsSaveRequests(cliProxyAPI: request))
+    func setAPIServiceRoutingEnabledFromMenu(_ enabled: Bool) async throws {
+        _ = try await self.setAPIServiceRoutingEnabled(enabled)
     }
 
     func enableAPIServiceRoutingFromMenu() async throws -> String {
+        try await self.enableAPIServiceRouting(
+            using: self.makeCurrentCLIProxyAPISettingsUpdate(enabled: true)
+        )
+    }
+
+    func setAPIServiceRoutingEnabled(
+        _ enabled: Bool,
+        using request: CLIProxyAPISettingsUpdate? = nil
+    ) async throws -> String? {
+        if enabled == false,
+           self.config.desktop.cliProxyAPI.enabled == false {
+            return nil
+        }
+
+        if enabled == false {
+            try self.disableAPIServiceRoutingAndRestoreDirect(
+                using: request ?? self.makeCurrentCLIProxyAPISettingsUpdate(enabled: false)
+            )
+            return nil
+        }
+
+        return try await self.enableAPIServiceRouting(
+            using: request ?? self.makeCurrentCLIProxyAPISettingsUpdate(enabled: true)
+        )
+    }
+
+    func setAPIServiceRuntimeRunningFromMenu(_ running: Bool) async throws {
+        try await self.setAPIServiceRuntimeRunning(running)
+    }
+
+    func setAPIServiceRuntimeRunning(
+        _ running: Bool,
+        using request: CLIProxyAPISettingsUpdate? = nil
+    ) async throws {
+        let previousConfig = self.config
+        let previousState = self.cliProxyAPIState
+        var updatedConfig = previousConfig
+        let appliedRequest = request ?? self.makeCurrentCLIProxyAPISettingsUpdate(
+            enabled: previousConfig.desktop.cliProxyAPI.enabled
+        )
+        SettingsSaveRequestApplier.apply(appliedRequest, to: &updatedConfig)
+
+        do {
+            try self.configStore.save(updatedConfig)
+            self.config = updatedConfig
+            self.publishState()
+            self.syncCLIProxyAPIStateFromConfig()
+            let nextSettings = updatedConfig.desktop.cliProxyAPI
+
+            let applied: Bool
+            if running {
+                applied = await self.applyOrReuseAPIServiceRuntimeConfiguration(nextSettings)
+            } else {
+                applied = await MainActor.run { [controller = self.apiServiceRuntimeController] in
+                    controller().stop()
+                    return true
+                }
+            }
+
+            guard applied else {
+                throw TokenStoreError.apiServiceRuntimeApplyFailed(
+                    self.cliProxyAPIState.lastError ?? Self.apiServiceRuntimeApplyFailureFallback
+                )
+            }
+        } catch {
+            try? self.configStore.save(previousConfig)
+            self.config = previousConfig
+            self.publishState()
+            self.syncCLIProxyAPIStateFromConfig()
+            await self.restoreAPIServiceRuntimeSnapshot(
+                previousConfig: previousConfig,
+                previousState: previousState
+            )
+            throw error
+        }
+    }
+
+    private func enableAPIServiceRouting(
+        using request: CLIProxyAPISettingsUpdate
+    ) async throws -> String {
         let previousConfig = self.config
         let previousDesktopSettings = previousConfig.desktop
+        let previousState = self.cliProxyAPIState
         var updatedConfig = previousConfig
-        let request = CLIProxyAPISettingsUpdate(
-            enabled: true,
-            host: previousConfig.desktop.cliProxyAPI.host,
-            port: previousConfig.desktop.cliProxyAPI.port,
-            repositoryRootPath: nil,
-            managementSecretKey: previousConfig.desktop.cliProxyAPI.managementSecretKey,
-            clientAPIKey: previousConfig.desktop.cliProxyAPI.clientAPIKey,
-            memberAccountIDs: previousConfig.desktop.cliProxyAPI.memberAccountIDs,
-            restrictFreeAccounts: previousConfig.desktop.cliProxyAPI.restrictFreeAccounts,
-            routingStrategy: previousConfig.desktop.cliProxyAPI.routingStrategy,
-            switchProjectOnQuotaExceeded: previousConfig.desktop.cliProxyAPI.switchProjectOnQuotaExceeded,
-            switchPreviewModelOnQuotaExceeded: previousConfig.desktop.cliProxyAPI.switchPreviewModelOnQuotaExceeded,
-            requestRetry: previousConfig.desktop.cliProxyAPI.requestRetry,
-            maxRetryInterval: previousConfig.desktop.cliProxyAPI.maxRetryInterval,
-            disableCooling: previousConfig.desktop.cliProxyAPI.disableCooling,
-            memberPrioritiesByAccountID: previousConfig.desktop.cliProxyAPI.memberPrioritiesByAccountID
-        )
         SettingsSaveRequestApplier.apply(request, to: &updatedConfig)
         self.configureDirectSelectionForEnablingAPIService(in: &updatedConfig)
         let synchronizedConfig = self.configForNativeSync(updatedConfig)
@@ -768,8 +813,13 @@ final class TokenStore: ObservableObject {
                 authURL: \.authPreAPIBackupURL,
                 configURL: \.configPreAPIBackupURL
             )
-            await MainActor.run {
-                CLIProxyAPIRuntimeController.shared.applyConfiguration(synchronizedConfig.desktop.cliProxyAPI)
+            let runtimeApplied = await self.applyOrReuseAPIServiceRuntimeConfiguration(
+                synchronizedConfig.desktop.cliProxyAPI
+            )
+            guard runtimeApplied else {
+                throw TokenStoreError.apiServiceRuntimeApplyFailed(
+                    self.cliProxyAPIState.lastError ?? Self.apiServiceRuntimeApplyFailureFallback
+                )
             }
             try await self.apiServiceRoutingProbeAction(probeConfig)
             try self.configStore.save(synchronizedConfig)
@@ -784,32 +834,49 @@ final class TokenStore: ObservableObject {
             )
             return L.menuAPIServiceRoutingProbeSuccess
         } catch {
-            let probeFailure = self.normalizeAPIServiceRoutingProbeFailure(error)
             let attemptedDesktopSettings = synchronizedConfig.desktop
 
             do {
                 try self.rollbackFailedAPIServiceRoutingEnable(
                     previousConfig: previousConfig,
                     previousDesktopSettings: previousDesktopSettings,
+                    previousState: previousState,
                     attemptedDesktopSettings: attemptedDesktopSettings
                 )
             } catch {
-                let summary = self.apiServiceRoutingProbeFailureSummary(probeFailure)
                 let rollbackDetail = Self.sanitizedAPIServiceRoutingProbeDetail(error.localizedDescription)
+                if case let TokenStoreError.apiServiceRuntimeApplyFailed(detail) = error {
+                    throw TokenStoreError.apiServiceRoutingRollbackFailed(
+                        "runtime_apply_failed: \(detail); rollback_failed: \(rollbackDetail)"
+                    )
+                }
+                let probeFailure = self.normalizeAPIServiceRoutingProbeFailure(error)
+                let summary = self.apiServiceRoutingProbeFailureSummary(probeFailure)
                 throw TokenStoreError.apiServiceRoutingRollbackFailed("\(summary); rollback_failed: \(rollbackDetail)")
             }
 
+            if case let TokenStoreError.apiServiceRuntimeApplyFailed(detail) = error {
+                throw TokenStoreError.apiServiceRuntimeApplyFailed(detail)
+            }
+
+            let probeFailure = self.normalizeAPIServiceRoutingProbeFailure(error)
             throw TokenStoreError.apiServiceRoutingProbeFailed(
                 self.apiServiceRoutingProbeFailureSummary(probeFailure)
             )
         }
     }
 
-    func disableAPIServiceRoutingAndRestoreDirect() throws {
+    func disableAPIServiceRoutingAndRestoreDirect(
+        using request: CLIProxyAPISettingsUpdate? = nil
+    ) throws {
         let previousConfig = self.config
         guard previousConfig.desktop.cliProxyAPI.enabled else { return }
         var updatedConfig = previousConfig
-        updatedConfig.desktop.cliProxyAPI.enabled = false
+        if let request {
+            SettingsSaveRequestApplier.apply(request, to: &updatedConfig)
+        } else {
+            updatedConfig.desktop.cliProxyAPI.enabled = false
+        }
         self.restoreDirectSelectionAfterDisablingAPIService(in: &updatedConfig)
         try self.commitActiveSelectionChange(
             updatedConfig: updatedConfig,
@@ -838,6 +905,7 @@ final class TokenStore: ObservableObject {
         let previousAPIServiceEnabled = self.config.desktop.cliProxyAPI.enabled
         let previousActiveProviderID = self.config.active.providerId
         let previousActiveAccountID = self.config.active.accountId
+        let previousAPIServiceState = self.cliProxyAPIState
         var updatedConfig = self.config
         try SettingsSaveRequestApplier.apply(requests, to: &updatedConfig)
         if let cliProxyRequest = requests.cliProxyAPI {
@@ -867,6 +935,15 @@ final class TokenStore: ObservableObject {
                 previousDesktopSettings: previousDesktopSettings,
                 reconfigureRuntimeAfterCommit: true
             )
+        } else if requests.cliProxyAPI != nil,
+                  previousAPIServiceState.runtimeProcessLikelyActive {
+            try self.commitCLIProxyAPISettingsChange(
+                updatedConfig: updatedConfig,
+                previousConfig: previousConfig,
+                previousDesktopSettings: previousDesktopSettings,
+                previousState: previousAPIServiceState,
+                shouldSyncCodex: shouldSyncCodex
+            )
         } else {
             self.config = updatedConfig
             try self.persist(syncCodex: shouldSyncCodex)
@@ -875,11 +952,6 @@ final class TokenStore: ObservableObject {
                 currentDesktopSettings: updatedConfig.desktop
             )
             self.syncCLIProxyAPIStateFromConfig()
-            if requests.cliProxyAPI != nil {
-                Task { @MainActor in
-                    CLIProxyAPIRuntimeController.shared.reconfigureIfRunning(updatedConfig.desktop.cliProxyAPI)
-                }
-            }
         }
         if requests.desktop?.containsUpdateSettingsChange == true {
             Task { @MainActor in
@@ -976,16 +1048,16 @@ final class TokenStore: ObservableObject {
         self.syncCLIProxyAPIStateFromConfig()
 
         if reconfigureRuntimeAfterCommit {
-            Task { @MainActor in
-                CLIProxyAPIRuntimeController.shared.applyConfiguration(synchronizedConfig.desktop.cliProxyAPI)
+            self.withAPIServiceRuntimeControllerSync { runtimeController in
+                runtimeController.applyConfiguration(synchronizedConfig.desktop.cliProxyAPI)
                 if synchronizedConfig.desktop.cliProxyAPI.enabled == false {
-                    CLIProxyAPIRuntimeController.shared.stop()
+                    runtimeController.stop()
                 }
             }
         } else if previousConfig.desktop.cliProxyAPI.enabled,
                   synchronizedConfig.desktop.cliProxyAPI.enabled == false {
-            Task { @MainActor in
-                CLIProxyAPIRuntimeController.shared.stop()
+            self.withAPIServiceRuntimeControllerSync { runtimeController in
+                runtimeController.stop()
             }
         }
     }
@@ -1440,24 +1512,150 @@ final class TokenStore: ObservableObject {
         }
     }
 
+    private func makeCurrentCLIProxyAPISettingsUpdate(enabled: Bool) -> CLIProxyAPISettingsUpdate {
+        CLIProxyAPISettingsUpdate(
+            enabled: enabled,
+            host: self.config.desktop.cliProxyAPI.host,
+            port: self.config.desktop.cliProxyAPI.port,
+            repositoryRootPath: nil,
+            managementSecretKey: self.config.desktop.cliProxyAPI.managementSecretKey,
+            clientAPIKey: self.config.desktop.cliProxyAPI.clientAPIKey,
+            memberAccountIDs: self.config.desktop.cliProxyAPI.memberAccountIDs,
+            restrictFreeAccounts: self.config.desktop.cliProxyAPI.restrictFreeAccounts,
+            routingStrategy: self.config.desktop.cliProxyAPI.routingStrategy,
+            switchProjectOnQuotaExceeded: self.config.desktop.cliProxyAPI.switchProjectOnQuotaExceeded,
+            switchPreviewModelOnQuotaExceeded: self.config.desktop.cliProxyAPI.switchPreviewModelOnQuotaExceeded,
+            requestRetry: self.config.desktop.cliProxyAPI.requestRetry,
+            maxRetryInterval: self.config.desktop.cliProxyAPI.maxRetryInterval,
+            disableCooling: self.config.desktop.cliProxyAPI.disableCooling,
+            memberPrioritiesByAccountID: self.config.desktop.cliProxyAPI.memberPrioritiesByAccountID
+        )
+    }
+
+    private func withAPIServiceRuntimeControllerSync<T>(
+        _ operation: @escaping @MainActor (any CLIProxyAPIRuntimeControlling) -> T
+    ) -> T {
+        if Thread.isMainThread {
+            return MainActor.assumeIsolated {
+                operation(self.apiServiceRuntimeController())
+            }
+        }
+
+        return DispatchQueue.main.sync {
+            MainActor.assumeIsolated {
+                operation(self.apiServiceRuntimeController())
+            }
+        }
+    }
+
+    @MainActor
+    private func applyOrReuseAPIServiceRuntimeConfiguration(
+        _ settings: CodexBarDesktopSettings.CLIProxyAPISettings
+    ) async -> Bool {
+        let runtimeController = self.apiServiceRuntimeController()
+        if runtimeController.applyConfiguration(settings) {
+            return true
+        }
+        return await runtimeController.adoptRunningServiceIfReusable(settings)
+    }
+
+    private func commitCLIProxyAPISettingsChange(
+        updatedConfig: CodexBarConfig,
+        previousConfig: CodexBarConfig,
+        previousDesktopSettings: CodexBarDesktopSettings,
+        previousState: CLIProxyAPIServiceState,
+        shouldSyncCodex: Bool
+    ) throws {
+        let synchronizedConfig = shouldSyncCodex ? self.configForNativeSync(updatedConfig) : updatedConfig
+
+        do {
+            if shouldSyncCodex {
+                try self.syncService.synchronize(config: synchronizedConfig)
+                try self.syncService.cleanupRemovedTargets(
+                    previousDesktopSettings: previousDesktopSettings,
+                    currentDesktopSettings: synchronizedConfig.desktop
+                )
+            }
+
+            try self.configStore.save(synchronizedConfig)
+            self.config = synchronizedConfig
+            self.publishState()
+            self.syncCLIProxyAPIStateFromConfig()
+
+            let runtimeApplied = self.withAPIServiceRuntimeControllerSync { runtimeController in
+                runtimeController.applyConfiguration(synchronizedConfig.desktop.cliProxyAPI)
+            }
+
+            guard runtimeApplied else {
+                throw TokenStoreError.apiServiceRuntimeApplyFailed(
+                    self.cliProxyAPIState.lastError ?? Self.apiServiceRuntimeApplyFailureFallback
+                )
+            }
+        } catch {
+            try self.rollbackFailedCLIProxyAPISettingsChange(
+                previousConfig: previousConfig,
+                previousDesktopSettings: previousDesktopSettings,
+                previousState: previousState,
+                attemptedDesktopSettings: synchronizedConfig.desktop,
+                shouldRestoreNativeConfiguration: shouldSyncCodex
+            )
+            throw error
+        }
+    }
+
+    private func restoreAPIServiceRuntimeSnapshot(
+        previousConfig: CodexBarConfig,
+        previousState: CLIProxyAPIServiceState
+    ) async {
+        await MainActor.run { [controller = self.apiServiceRuntimeController] in
+            let runtimeController = controller()
+            if previousState.runtimeProcessLikelyActive {
+                _ = runtimeController.applyConfiguration(previousConfig.desktop.cliProxyAPI)
+            } else {
+                runtimeController.stop()
+            }
+        }
+    }
+
     private func rollbackFailedAPIServiceRoutingEnable(
         previousConfig: CodexBarConfig,
         previousDesktopSettings: CodexBarDesktopSettings,
+        previousState: CLIProxyAPIServiceState,
         attemptedDesktopSettings: CodexBarDesktopSettings
     ) throws {
-        _ = try self.syncService.restoreNativeConfiguration(desktopSettings: attemptedDesktopSettings)
-        try self.syncService.cleanupRemovedTargets(
-            previousDesktopSettings: attemptedDesktopSettings,
-            currentDesktopSettings: previousDesktopSettings
+        try self.rollbackFailedCLIProxyAPISettingsChange(
+            previousConfig: previousConfig,
+            previousDesktopSettings: previousDesktopSettings,
+            previousState: previousState,
+            attemptedDesktopSettings: attemptedDesktopSettings,
+            shouldRestoreNativeConfiguration: true
         )
+    }
+
+    private func rollbackFailedCLIProxyAPISettingsChange(
+        previousConfig: CodexBarConfig,
+        previousDesktopSettings: CodexBarDesktopSettings,
+        previousState: CLIProxyAPIServiceState,
+        attemptedDesktopSettings: CodexBarDesktopSettings,
+        shouldRestoreNativeConfiguration: Bool
+    ) throws {
+        if shouldRestoreNativeConfiguration {
+            _ = try self.syncService.restoreNativeConfiguration(desktopSettings: attemptedDesktopSettings)
+            try self.syncService.cleanupRemovedTargets(
+                previousDesktopSettings: attemptedDesktopSettings,
+                currentDesktopSettings: previousDesktopSettings
+            )
+        }
+
         try self.configStore.save(previousConfig)
         self.config = previousConfig
         self.publishState()
         self.syncCLIProxyAPIStateFromConfig()
-        Task { @MainActor in
-            CLIProxyAPIRuntimeController.shared.applyConfiguration(previousDesktopSettings.cliProxyAPI)
-            if previousDesktopSettings.cliProxyAPI.enabled == false {
-                CLIProxyAPIRuntimeController.shared.stop()
+        self.withAPIServiceRuntimeControllerSync { runtimeController in
+            if previousState.runtimeProcessLikelyActive {
+                _ = runtimeController.applyConfiguration(previousDesktopSettings.cliProxyAPI)
+            } else {
+                runtimeController.stop()
             }
         }
     }
@@ -1758,6 +1956,7 @@ enum TokenStoreError: LocalizedError {
     case invalidInput
     case invalidCodexAppPath
     case missingAccountActivationPath
+    case apiServiceRuntimeApplyFailed(String)
     case apiServiceRoutingProbeFailed(String)
     case apiServiceRoutingRollbackFailed(String)
 
@@ -1768,6 +1967,7 @@ enum TokenStoreError: LocalizedError {
         case .invalidInput: return "输入无效"
         case .invalidCodexAppPath: return L.codexAppPathInvalidSelection
         case .missingAccountActivationPath: return L.accountActivationRootPathsRequired
+        case .apiServiceRuntimeApplyFailed(let detail): return detail
         case .apiServiceRoutingProbeFailed(let detail): return L.menuAPIServiceRoutingProbeFailed(detail)
         case .apiServiceRoutingRollbackFailed(let detail): return L.menuAPIServiceRoutingRollbackFailed(detail)
         }

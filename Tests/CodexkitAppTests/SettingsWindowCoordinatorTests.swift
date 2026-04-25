@@ -86,7 +86,7 @@ final class SettingsWindowCoordinatorTests: XCTestCase {
         coordinator.update(\.cliProxyAPIEnabled, to: true, field: .cliProxyAPIEnabled)
         coordinator.update(\.cliProxyAPIHost, to: "0.0.0.0", field: .cliProxyAPIHost)
         coordinator.update(\.cliProxyAPIPort, to: 9317, field: .cliProxyAPIPort)
-        coordinator.update(\.cliProxyAPIManagementSecretKey, to: "manual-secret", field: .cliProxyAPIManagementSecretKey)
+        coordinator.update(\.cliProxyAPIClientAPIKey, to: "manual-client-key", field: .cliProxyAPIClientAPIKey)
         coordinator.update(\.cliProxyAPIMemberAccountIDs, to: ["acct_alpha"], field: .cliProxyAPIMemberAccountIDs)
         coordinator.selectedPage = .updates
 
@@ -105,7 +105,7 @@ final class SettingsWindowCoordinatorTests: XCTestCase {
         XCTAssertTrue(coordinator.draft.cliProxyAPIEnabled)
         XCTAssertEqual(coordinator.draft.cliProxyAPIHost, "0.0.0.0")
         XCTAssertEqual(coordinator.draft.cliProxyAPIPort, 9317)
-        XCTAssertEqual(coordinator.draft.cliProxyAPIManagementSecretKey, "manual-secret")
+        XCTAssertEqual(coordinator.draft.cliProxyAPIClientAPIKey, "manual-client-key")
         XCTAssertEqual(coordinator.draft.cliProxyAPIMemberAccountIDs, ["acct_alpha"])
     }
 
@@ -242,7 +242,7 @@ final class SettingsWindowCoordinatorTests: XCTestCase {
         coordinator.update(\.cliProxyAPIEnabled, to: true, field: .cliProxyAPIEnabled)
         coordinator.update(\.cliProxyAPIHost, to: "0.0.0.0", field: .cliProxyAPIHost)
         coordinator.update(\.cliProxyAPIPort, to: 9317, field: .cliProxyAPIPort)
-        coordinator.update(\.cliProxyAPIManagementSecretKey, to: "manual-secret", field: .cliProxyAPIManagementSecretKey)
+        coordinator.update(\.cliProxyAPIClientAPIKey, to: "manual-client-key", field: .cliProxyAPIClientAPIKey)
         coordinator.update(\.cliProxyAPIMemberAccountIDs, to: ["acct_alpha"], field: .cliProxyAPIMemberAccountIDs)
 
         let requests = try coordinator.save(using: sink)
@@ -285,7 +285,8 @@ final class SettingsWindowCoordinatorTests: XCTestCase {
         XCTAssertEqual(apiRequest.host, "0.0.0.0")
         XCTAssertEqual(apiRequest.port, 9317)
         XCTAssertNil(apiRequest.repositoryRootPath)
-        XCTAssertEqual(apiRequest.managementSecretKey, "manual-secret")
+        XCTAssertEqual(apiRequest.managementSecretKey, coordinator.draft.cliProxyAPIManagementSecretKey)
+        XCTAssertEqual(apiRequest.clientAPIKey, "manual-client-key")
         XCTAssertEqual(apiRequest.memberAccountIDs, ["acct_alpha"])
         XCTAssertEqual(apiRequest.routingStrategy, .fillFirst)
         XCTAssertFalse(apiRequest.switchPreviewModelOnQuotaExceeded)
@@ -313,6 +314,7 @@ final class SettingsWindowCoordinatorTests: XCTestCase {
         XCTAssertEqual(reopened.draft.cliProxyAPIMemberAccountIDs, ["acct_alpha"])
         XCTAssertFalse(reopened.draft.cliProxyAPIHost.isEmpty)
         XCTAssertFalse(reopened.draft.cliProxyAPIManagementSecretKey.isEmpty)
+        XCTAssertEqual(reopened.draft.cliProxyAPIClientAPIKey, "manual-client-key")
     }
 
     func testPageScopedSaveOnlyAppliesCurrentPageRequests() throws {
@@ -882,6 +884,122 @@ final class SettingsWindowCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(coordinator.draft.accountOrder, ["acct_gamma", "acct_alpha"])
         XCTAssertEqual(coordinator.orderedAccounts.map(\.id), ["acct_gamma", "acct_alpha"])
+    }
+
+    func testAPIServiceRoutingEnablePreflightRequiresSelectedMembersAndRunningRuntime() {
+        let coordinator = SettingsWindowCoordinator(
+            config: self.makeConfig(),
+            accounts: [
+                self.makeAccount(email: "alpha@example.com", accountId: "acct_alpha"),
+            ],
+            selectedPage: .apiService
+        )
+
+        XCTAssertEqual(
+            coordinator.apiServiceRoutingEnablePreflightMessage(
+                runtimeState: CLIProxyAPIServiceState(
+                    config: CLIProxyAPIServiceConfig(
+                        host: "127.0.0.1",
+                        port: 8317,
+                        authDirectory: CLIProxyAPIService.authDirectoryURL,
+                        managementSecretKey: "secret",
+                        clientAPIKey: "client-key"
+                    ),
+                    status: .stopped
+                )
+            ),
+            L.menuAPIServiceSetupRequiredMessage
+        )
+
+        coordinator.update(\.cliProxyAPIMemberAccountIDs, to: ["acct_alpha"], field: .cliProxyAPIMemberAccountIDs)
+
+        XCTAssertEqual(
+            coordinator.apiServiceRoutingEnablePreflightMessage(
+                runtimeState: CLIProxyAPIServiceState(
+                    config: CLIProxyAPIServiceConfig(
+                        host: "127.0.0.1",
+                        port: 8317,
+                        authDirectory: CLIProxyAPIService.authDirectoryURL,
+                        managementSecretKey: "secret",
+                        clientAPIKey: "client-key"
+                    ),
+                    status: .starting
+                )
+            ),
+            L.menuAPIServiceStartRequiredMessage
+        )
+
+        XCTAssertNil(
+            coordinator.apiServiceRoutingEnablePreflightMessage(
+                runtimeState: CLIProxyAPIServiceState(
+                    config: CLIProxyAPIServiceConfig(
+                        host: "127.0.0.1",
+                        port: 8317,
+                        authDirectory: CLIProxyAPIService.authDirectoryURL,
+                        managementSecretKey: "secret",
+                        clientAPIKey: "client-key"
+                    ),
+                    status: .running
+                )
+            )
+        )
+    }
+
+    func testAPIServiceRuntimeStartActionCommitsRuntimeFieldsWithoutApplyingEnabledDirtyState() {
+        let coordinator = SettingsWindowCoordinator(
+            config: self.makeConfig(),
+            accounts: [
+                self.makeAccount(email: "alpha@example.com", accountId: "acct_alpha"),
+            ],
+            selectedPage: .apiService
+        )
+
+        coordinator.update(\.cliProxyAPIHost, to: "0.0.0.0", field: .cliProxyAPIHost)
+        coordinator.update(\.cliProxyAPIPort, to: 9317, field: .cliProxyAPIPort)
+        coordinator.update(\.cliProxyAPIEnabled, to: true, field: .cliProxyAPIEnabled)
+        coordinator.update(\.cliProxyAPIClientAPIKey, to: "draft-client-key", field: .cliProxyAPIClientAPIKey)
+
+        coordinator.completeAPIServiceRuntimeStartAction()
+
+        XCTAssertEqual(coordinator.draft.cliProxyAPIHost, "0.0.0.0")
+        let request = coordinator.makeSaveRequests(for: .apiService).cliProxyAPI
+        XCTAssertEqual(request?.enabled, true)
+        XCTAssertEqual(request?.clientAPIKey, "draft-client-key")
+        XCTAssertEqual(
+            coordinator.makeAPIServiceRuntimeActionRequest(
+                clientAPIKey: "persisted-client-key",
+                persistedEnabled: false
+            ).enabled,
+            false
+        )
+        XCTAssertEqual(
+            coordinator.makeAPIServiceRuntimeActionRequest(
+                clientAPIKey: "persisted-client-key",
+                persistedEnabled: false
+            ).clientAPIKey,
+            "draft-client-key"
+        )
+    }
+
+    func testRollbackAPIServiceEnabledActionRevertsOnlyEnabledField() {
+        let coordinator = SettingsWindowCoordinator(
+            config: self.makeConfig(),
+            accounts: [
+                self.makeAccount(email: "alpha@example.com", accountId: "acct_alpha"),
+            ],
+            selectedPage: .apiService
+        )
+
+        coordinator.update(\.cliProxyAPIHost, to: "0.0.0.0", field: .cliProxyAPIHost)
+        coordinator.update(\.cliProxyAPIEnabled, to: true, field: .cliProxyAPIEnabled)
+
+        coordinator.rollbackAPIServiceEnabledAction("routing failed")
+
+        XCTAssertEqual(coordinator.draft.cliProxyAPIHost, "0.0.0.0")
+        XCTAssertFalse(coordinator.draft.cliProxyAPIEnabled)
+        XCTAssertEqual(coordinator.validationMessage, "routing failed")
+        XCTAssertEqual(coordinator.makeSaveRequests(for: .apiService).cliProxyAPI?.host, "0.0.0.0")
+        XCTAssertEqual(coordinator.makeSaveRequests(for: .apiService).cliProxyAPI?.enabled, false)
     }
 
     private func makeConfig(

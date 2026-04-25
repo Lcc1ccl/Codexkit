@@ -1313,11 +1313,9 @@ private struct SettingsManualUpdateSheet: View {
 private struct SettingsAPIServicePage: View {
     @ObservedObject var coordinator: SettingsWindowCoordinator
     @ObservedObject var store: TokenStore
-    @State private var isCheckingHealth = false
-    @State private var isRefreshingQuota = false
     @State private var isImportingConfiguration = false
     @State private var importSourcePath = ""
-    @State private var revealsManagementKey = false
+    @State private var revealsClientAPIKey = false
     @State private var previewSnapshot: CLIProxyAPISyncSnapshot?
 
     private let probeService = CLIProxyAPIProbeService.shared
@@ -1328,6 +1326,7 @@ private struct SettingsAPIServicePage: View {
             state.config.host = previewSnapshot.values.host
             state.config.port = previewSnapshot.values.port
             state.config.managementSecretKey = previewSnapshot.values.managementSecretKey
+            state.config.clientAPIKey = previewSnapshot.values.clientAPIKey
             state.config.routingStrategy = previewSnapshot.values.routingStrategy
             state.config.switchProjectOnQuotaExceeded = previewSnapshot.values.switchProjectOnQuotaExceeded
             state.config.switchPreviewModelOnQuotaExceeded = previewSnapshot.values.switchPreviewModelOnQuotaExceeded
@@ -1347,16 +1346,6 @@ private struct SettingsAPIServicePage: View {
         return state
     }
 
-    private var canStartService: Bool {
-        self.displayedState.canStartRuntimeFromSettings(
-            hasSelectedMembers: self.coordinator.draft.cliProxyAPIMemberAccountIDs.isEmpty == false
-        )
-    }
-
-    private var canStopService: Bool {
-        self.displayedState.canStopRuntimeFromSettings
-    }
-
     private var memberGroups: [CLIProxyAPIAccountGroup] {
         CLIProxyAPIAccountGrouping.groupedMemberAccounts(
             localAccounts: self.store.accounts,
@@ -1370,57 +1359,10 @@ private struct SettingsAPIServicePage: View {
             Text(SettingsPage.apiService.title)
                 .font(.system(size: 16, weight: .semibold))
 
-            HStack(spacing: 12) {
-                Button(L.settingsAPIServiceStartNow) {
-                    CLIProxyAPIRuntimeController.shared.applyConfiguration(self.coordinator.draft.cliProxyAPISettings)
-                }
-                .disabled(self.canStartService == false)
-
-                Button(L.settingsAPIServiceStopNow) {
-                    CLIProxyAPIRuntimeController.shared.stop()
-                }
-                .disabled(self.canStopService == false)
-
-                Button(self.isCheckingHealth ? L.settingsAPIServiceChecking : L.settingsAPIServiceCheckHealth) {
-                    self.isCheckingHealth = true
-                    Task { @MainActor in
-                        await CLIProxyAPIRuntimeController.shared.refreshHealth()
-                        self.isCheckingHealth = false
-                    }
-                }
-                .disabled(self.isCheckingHealth)
-
-                Button(self.isRefreshingQuota ? L.settingsAPIServiceRefreshingQuota : L.settingsAPIServiceRefreshQuota) {
-                    self.isRefreshingQuota = true
-                    Task { @MainActor in
-                        await CLIProxyAPIRuntimeController.shared.refreshQuotaSnapshot(trigger: "settings")
-                        self.isRefreshingQuota = false
-                    }
-                }
-                .disabled(self.isRefreshingQuota || self.displayedState.status == .stopped)
-
-                Text(L.settingsAPIServiceRuntimeStatus(self.displayedState.status.rawValue))
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(.secondary)
-            }
-
             VStack(alignment: .leading, spacing: 12) {
-                Toggle(
-                    L.settingsAPIServiceConfigEnabled,
-                    isOn: Binding(
-                        get: { self.coordinator.draft.cliProxyAPIEnabled },
-                        set: { self.coordinator.update(\.cliProxyAPIEnabled, to: $0, field: .cliProxyAPIEnabled) }
-                    )
-                )
-
-                Text(L.settingsAPIServiceConfigHint)
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
                 HStack(alignment: .top, spacing: 12) {
                     self.addressCard
-                    self.managementKeyCard
+                    self.clientAPIKeyCard
                     self.portCard
                 }
 
@@ -1504,22 +1446,24 @@ private struct SettingsAPIServicePage: View {
         }
     }
 
-    private var managementKeyCard: some View {
+    private var clientAPIKeyCard: some View {
         SettingsAPIServiceFieldCard(
-            title: L.menuAPIServiceKeyLabel,
+            title: L.settingsAPIServiceClientAPIKey,
             headerActions: {
                 HStack(spacing: 6) {
-                    SettingsAPIServiceIconButton(systemName: self.revealsManagementKey ? "eye.slash" : "eye") {
-                        self.revealsManagementKey.toggle()
+                    SettingsAPIServiceIconButton(systemName: self.revealsClientAPIKey ? "eye.slash" : "eye") {
+                        self.revealsClientAPIKey.toggle()
                     }
                     SettingsAPIServiceIconButton(systemName: "doc.on.doc") {
-                        self.copyToPasteboard(self.coordinator.draft.cliProxyAPIManagementSecretKey)
+                        self.copyToPasteboard(self.coordinator.draft.cliProxyAPIClientAPIKey)
                     }
                     SettingsAPIServiceIconButton(systemName: "arrow.triangle.2.circlepath") {
                         self.coordinator.update(
-                            \.cliProxyAPIManagementSecretKey,
-                            to: CLIProxyAPIService.shared.generateManagementSecretKey(),
-                            field: .cliProxyAPIManagementSecretKey
+                            \.cliProxyAPIClientAPIKey,
+                            to: CLIProxyAPIService.shared.generateDistinctClientAPIKey(
+                                managementSecretKey: self.coordinator.draft.cliProxyAPIManagementSecretKey
+                            ),
+                            field: .cliProxyAPIClientAPIKey
                         )
                     }
                 }
@@ -1527,20 +1471,20 @@ private struct SettingsAPIServicePage: View {
         ) {
             HStack(spacing: 8) {
                 Group {
-                    if self.revealsManagementKey {
+                    if self.revealsClientAPIKey {
                         TextField(
-                            L.settingsAPIServiceKeyPlaceholder,
+                            L.settingsAPIServiceClientAPIKeyPlaceholder,
                             text: Binding(
-                                get: { self.coordinator.draft.cliProxyAPIManagementSecretKey },
-                                set: { self.coordinator.update(\.cliProxyAPIManagementSecretKey, to: $0, field: .cliProxyAPIManagementSecretKey) }
+                                get: { self.coordinator.draft.cliProxyAPIClientAPIKey },
+                                set: { self.coordinator.update(\.cliProxyAPIClientAPIKey, to: $0, field: .cliProxyAPIClientAPIKey) }
                             )
                         )
                     } else {
                         SecureField(
-                            L.settingsAPIServiceKeyPlaceholder,
+                            L.settingsAPIServiceClientAPIKeyPlaceholder,
                             text: Binding(
-                                get: { self.coordinator.draft.cliProxyAPIManagementSecretKey },
-                                set: { self.coordinator.update(\.cliProxyAPIManagementSecretKey, to: $0, field: .cliProxyAPIManagementSecretKey) }
+                                get: { self.coordinator.draft.cliProxyAPIClientAPIKey },
+                                set: { self.coordinator.update(\.cliProxyAPIClientAPIKey, to: $0, field: .cliProxyAPIClientAPIKey) }
                             )
                         )
                     }
@@ -1802,6 +1746,7 @@ private struct SettingsAPIServicePage: View {
         self.coordinator.update(\.cliProxyAPIHost, to: values.host, field: .cliProxyAPIHost)
         self.coordinator.update(\.cliProxyAPIPort, to: values.port, field: .cliProxyAPIPort)
         self.coordinator.update(\.cliProxyAPIManagementSecretKey, to: values.managementSecretKey, field: .cliProxyAPIManagementSecretKey)
+        self.coordinator.update(\.cliProxyAPIClientAPIKey, to: values.clientAPIKey, field: .cliProxyAPIClientAPIKey)
         self.coordinator.update(\.cliProxyAPIRoutingStrategy, to: values.routingStrategy, field: .cliProxyAPIRoutingStrategy)
         self.coordinator.update(\.cliProxyAPISwitchProjectOnQuotaExceeded, to: values.switchProjectOnQuotaExceeded, field: .cliProxyAPISwitchProjectOnQuotaExceeded)
         self.coordinator.update(\.cliProxyAPISwitchPreviewModelOnQuotaExceeded, to: values.switchPreviewModelOnQuotaExceeded, field: .cliProxyAPISwitchPreviewModelOnQuotaExceeded)
@@ -2144,27 +2089,6 @@ private struct SettingsAPIServiceQuotaGroupView: View {
         .overlay(
             RoundedRectangle(cornerRadius: 12)
                 .stroke(Color.primary.opacity(0.05), lineWidth: 1)
-        )
-    }
-}
-
-private extension SettingsWindowDraft {
-    var cliProxyAPISettings: CodexBarDesktopSettings.CLIProxyAPISettings {
-        .init(
-            enabled: self.cliProxyAPIEnabled,
-            host: self.cliProxyAPIHost,
-            port: self.cliProxyAPIPort,
-            repositoryRootPath: nil,
-            managementSecretKey: self.cliProxyAPIManagementSecretKey,
-            memberAccountIDs: self.cliProxyAPIMemberAccountIDs,
-            restrictFreeAccounts: self.cliProxyAPIRestrictFreeAccounts,
-            routingStrategy: self.cliProxyAPIRoutingStrategy,
-            switchProjectOnQuotaExceeded: self.cliProxyAPISwitchProjectOnQuotaExceeded,
-            switchPreviewModelOnQuotaExceeded: self.cliProxyAPISwitchPreviewModelOnQuotaExceeded,
-            requestRetry: self.cliProxyAPIRequestRetry,
-            maxRetryInterval: self.cliProxyAPIMaxRetryInterval,
-            disableCooling: self.cliProxyAPIDisableCooling,
-            memberPrioritiesByAccountID: self.cliProxyAPIMemberPrioritiesByAccountID
         )
     }
 }

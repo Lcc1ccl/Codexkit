@@ -4,6 +4,7 @@ struct CLIProxyAPISuggestedDraftValues: Equatable {
     var host: String
     var port: Int
     var managementSecretKey: String
+    var clientAPIKey: String
     var routingStrategy: CLIProxyAPIRoutingStrategy
     var switchProjectOnQuotaExceeded: Bool
     var switchPreviewModelOnQuotaExceeded: Bool
@@ -47,15 +48,20 @@ final class CLIProxyAPIProbeService {
         let shouldPreferGeneratedDefaults =
             existingSettings.port == 8317 &&
             existingSettings.managementSecretKey == nil
+        let resolvedManagementSecretKey = localConfig.managementSecretKey
+            ?? existingSettings.managementSecretKey
+            ?? self.service.generateManagementSecretKey()
+        let resolvedClientAPIKey = existingSettings.clientAPIKey
+            ?? localConfig.clientAPIKey
+            ?? self.service.generateDistinctClientAPIKey(managementSecretKey: resolvedManagementSecretKey)
 
         return CLIProxyAPISuggestedDraftValues(
             host: localConfig.host ?? existingSettings.host,
             port: shouldPreferGeneratedDefaults
                 ? (localConfig.port ?? self.service.generateRandomAvailablePort())
                 : existingSettings.port,
-            managementSecretKey: localConfig.managementSecretKey
-                ?? existingSettings.managementSecretKey
-                ?? self.service.generateManagementSecretKey(),
+            managementSecretKey: resolvedManagementSecretKey,
+            clientAPIKey: resolvedClientAPIKey,
             routingStrategy: shouldUseLocalConfig ? localConfig.routingStrategy : existingSettings.routingStrategy,
             switchProjectOnQuotaExceeded: shouldUseLocalConfig ? localConfig.switchProjectOnQuotaExceeded : existingSettings.switchProjectOnQuotaExceeded,
             switchPreviewModelOnQuotaExceeded: shouldUseLocalConfig ? localConfig.switchPreviewModelOnQuotaExceeded : existingSettings.switchPreviewModelOnQuotaExceeded,
@@ -100,6 +106,7 @@ final class CLIProxyAPIProbeService {
             config.host = localConfig.host ?? config.host
             config.port = localPort
             config.managementSecretKey = localConfig.managementSecretKey ?? config.managementSecretKey
+            config.clientAPIKey = localConfig.clientAPIKey ?? config.clientAPIKey
             config.routingStrategy = localConfig.routingStrategy
             config.switchProjectOnQuotaExceeded = localConfig.switchProjectOnQuotaExceeded
             config.switchPreviewModelOnQuotaExceeded = localConfig.switchPreviewModelOnQuotaExceeded
@@ -113,6 +120,7 @@ final class CLIProxyAPIProbeService {
             config.host = remoteConfig.host ?? config.host
             config.port = remoteConfig.port ?? config.port
             config.managementSecretKey = remoteConfig.managementSecretKey ?? config.managementSecretKey
+            config.clientAPIKey = remoteConfig.clientAPIKey ?? config.clientAPIKey
             resolvedAuthDirectoryPath = remoteConfig.authDirectoryPath ?? resolvedAuthDirectoryPath
             config.routingStrategy = remoteConfig.routingStrategy
             config.switchProjectOnQuotaExceeded = remoteConfig.switchProjectOnQuotaExceeded
@@ -155,6 +163,8 @@ final class CLIProxyAPIProbeService {
                 host: config.host,
                 port: config.port,
                 managementSecretKey: config.managementSecretKey,
+                clientAPIKey: config.clientAPIKey
+                    ?? self.service.generateDistinctClientAPIKey(managementSecretKey: config.managementSecretKey),
                 routingStrategy: config.routingStrategy,
                 switchProjectOnQuotaExceeded: config.switchProjectOnQuotaExceeded,
                 switchPreviewModelOnQuotaExceeded: config.switchPreviewModelOnQuotaExceeded,
