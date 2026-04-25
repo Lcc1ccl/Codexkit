@@ -791,8 +791,11 @@ final class CLIProxyAPIService {
         var candidates: [URL] = []
         var seen: Set<String> = []
 
-        func append(_ url: URL?) {
+        func appendExistingDirectory(_ url: URL?) {
             guard let url else { return }
+            var isDirectory: ObjCBool = false
+            guard self.fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue else { return }
             let standardized = url.standardizedFileURL
             guard seen.insert(standardized.path).inserted else { return }
             candidates.append(standardized)
@@ -802,7 +805,7 @@ final class CLIProxyAPIService {
         for root in roots {
             var current = root.standardizedFileURL
             while true {
-                append(
+                appendExistingDirectory(
                     current
                         .appendingPathComponent("Codexkit", isDirectory: true)
                         .appendingPathComponent("Sources", isDirectory: true)
@@ -810,7 +813,7 @@ final class CLIProxyAPIService {
                         .appendingPathComponent("Bundled", isDirectory: true)
                         .appendingPathComponent("CLIProxyAPIServiceBundle", isDirectory: true)
                 )
-                append(
+                appendExistingDirectory(
                     current
                         .appendingPathComponent("Sources", isDirectory: true)
                         .appendingPathComponent("CodexkitApp", isDirectory: true)
@@ -825,7 +828,7 @@ final class CLIProxyAPIService {
         }
 
         if searchRoots == nil {
-            append(Bundle.module.resourceURL?.appendingPathComponent("CLIProxyAPIServiceBundle", isDirectory: true))
+            appendExistingDirectory(Bundle.module.resourceURL?.appendingPathComponent("CLIProxyAPIServiceBundle", isDirectory: true))
         }
 
         return candidates
@@ -835,8 +838,11 @@ final class CLIProxyAPIService {
         var candidates: [URL] = []
         var seen: Set<String> = []
 
-        func append(_ url: URL?) {
+        func appendExistingDirectory(_ url: URL?) {
             guard let url else { return }
+            var isDirectory: ObjCBool = false
+            guard self.fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue else { return }
             let standardized = url.standardizedFileURL
             guard seen.insert(standardized.path).inserted else { return }
             candidates.append(standardized)
@@ -846,7 +852,7 @@ final class CLIProxyAPIService {
         for root in roots {
             var current = root.standardizedFileURL
             while true {
-                append(
+                appendExistingDirectory(
                     current
                         .appendingPathComponent("Codexkit", isDirectory: true)
                         .appendingPathComponent("Sources", isDirectory: true)
@@ -855,7 +861,7 @@ final class CLIProxyAPIService {
                         .appendingPathComponent("CLIProxyAPIServiceBundle", isDirectory: true)
                         .appendingPathComponent("CLIProxyAPI", isDirectory: true)
                 )
-                append(
+                appendExistingDirectory(
                     current
                         .appendingPathComponent("Sources", isDirectory: true)
                         .appendingPathComponent("CodexkitApp", isDirectory: true)
@@ -871,7 +877,7 @@ final class CLIProxyAPIService {
         }
 
         if searchRoots == nil {
-            append(Bundle.module.resourceURL?.appendingPathComponent(Self.bundledServiceRelativePath, isDirectory: true))
+            appendExistingDirectory(Bundle.module.resourceURL?.appendingPathComponent(Self.bundledServiceRelativePath, isDirectory: true))
         }
 
         return candidates
