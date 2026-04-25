@@ -543,7 +543,8 @@ final class CLIProxyAPIService {
             }
         }
 
-        if let bundledResourceURL = Bundle.module.resourceURL?
+        if searchRoots == nil,
+           let bundledResourceURL = Bundle.module.resourceURL?
             .appendingPathComponent(Self.bundledExecutableRelativePath),
            self.isExecutableFile(bundledResourceURL) {
             return bundledResourceURL
@@ -823,7 +824,9 @@ final class CLIProxyAPIService {
             }
         }
 
-        append(Bundle.module.resourceURL?.appendingPathComponent("CLIProxyAPIServiceBundle", isDirectory: true))
+        if searchRoots == nil {
+            append(Bundle.module.resourceURL?.appendingPathComponent("CLIProxyAPIServiceBundle", isDirectory: true))
+        }
 
         return candidates
     }
@@ -867,7 +870,9 @@ final class CLIProxyAPIService {
             }
         }
 
-        append(Bundle.module.resourceURL?.appendingPathComponent(Self.bundledServiceRelativePath, isDirectory: true))
+        if searchRoots == nil {
+            append(Bundle.module.resourceURL?.appendingPathComponent(Self.bundledServiceRelativePath, isDirectory: true))
+        }
 
         return candidates
     }

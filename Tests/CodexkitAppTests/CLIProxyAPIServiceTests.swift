@@ -173,6 +173,16 @@ final class CLIProxyAPIServiceTests: CodexBarTestCase {
         XCTAssertNotNil(detected)
     }
 
+    func testExplicitBundledSearchRootsDoNotFallBackToPackageResources() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let service = CLIProxyAPIService(currentDirectoryURL: root)
+
+        XCTAssertNil(service.resolveBundledRuntimeDescriptor(searchRoots: [root]))
+        XCTAssertNil(service.bundledExecutableURL(searchRoots: [root]))
+    }
+
     func testResolveBundledRuntimeDescriptorReadsManifestMetadata() throws {
         let service = CLIProxyAPIService()
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
