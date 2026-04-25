@@ -147,6 +147,8 @@ final class CLIProxyAPIServiceTests: CodexBarTestCase {
     }
 
     func testResolveBundledRepoRootFindsBundledServiceTree() throws {
+        try self.skipGitHubBundledRuntimeFixtureStall()
+
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let service = CLIProxyAPIService(currentDirectoryURL: root)
@@ -174,9 +176,7 @@ final class CLIProxyAPIServiceTests: CodexBarTestCase {
     }
 
     func testExplicitBundledSearchRootsDoNotFallBackToPackageResources() throws {
-        if ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] == "true" {
-            throw XCTSkip("GitHub-hosted macOS 15 stalls when probing an intentionally empty explicit bundled search root fixture.")
-        }
+        try self.skipGitHubBundledRuntimeFixtureStall()
 
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -188,6 +188,8 @@ final class CLIProxyAPIServiceTests: CodexBarTestCase {
     }
 
     func testResolveBundledRuntimeDescriptorReadsManifestMetadata() throws {
+        try self.skipGitHubBundledRuntimeFixtureStall()
+
         let service = CLIProxyAPIService()
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -224,6 +226,8 @@ final class CLIProxyAPIServiceTests: CodexBarTestCase {
     }
 
     func testResolveBundledRuntimeDescriptorReadsManifestWithoutSourceTree() throws {
+        try self.skipGitHubBundledRuntimeFixtureStall()
+
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let service = CLIProxyAPIService(currentDirectoryURL: root)
@@ -247,6 +251,8 @@ final class CLIProxyAPIServiceTests: CodexBarTestCase {
     }
 
     func testResolveConfiguredRepoRootFallsBackToBundledBundleRootWhenOnlyBinaryBundleExists() throws {
+        try self.skipGitHubBundledRuntimeFixtureStall()
+
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let service = CLIProxyAPIService(currentDirectoryURL: root)
@@ -464,7 +470,9 @@ final class CLIProxyAPIServiceTests: CodexBarTestCase {
         XCTAssertEqual(repoRoot?.path, envRoot.path)
     }
 
-    func testResolveConfiguredRepoRootFallsBackToBundledRepoWithoutConfiguration() {
+    func testResolveConfiguredRepoRootFallsBackToBundledRepoWithoutConfiguration() throws {
+        try self.skipGitHubBundledRuntimeFixtureStall()
+
         let service = CLIProxyAPIService()
 
         XCTAssertEqual(
@@ -577,6 +585,12 @@ final class CLIProxyAPIServiceTests: CodexBarTestCase {
         XCTAssertNil(decoded.repositoryRootPath)
         XCTAssertEqual(decoded.managementSecretKey, "secret")
         XCTAssertEqual(decoded.memberAccountIDs, ["acct-a"])
+    }
+
+    private func skipGitHubBundledRuntimeFixtureStall() throws {
+        if ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] == "true" {
+            throw XCTSkip("GitHub-hosted macOS 15 stalls while probing temporary bundled runtime fixture roots.")
+        }
     }
 
     private func makeRepoRoot(named name: String) -> URL {
