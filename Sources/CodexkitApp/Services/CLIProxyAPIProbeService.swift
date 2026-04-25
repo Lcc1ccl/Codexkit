@@ -73,7 +73,7 @@ final class CLIProxyAPIProbeService {
 
     func detectExternalRepositoryRoot() -> URL? {
         if let envRoot = self.service.processEnvironment["CLIProxyAPI_REPO_ROOT"]
-            .flatMap({ self.service.resolveConfiguredRepoRoot(explicitPath: $0, environment: [:]) }),
+            .flatMap({ self.configuredRepositoryRoot(from: $0) }),
            self.isBundledRepositoryRoot(envRoot) == false {
             return envRoot
         }
@@ -84,6 +84,19 @@ final class CLIProxyAPIProbeService {
         url.standardizedFileURL.path.hasSuffix("/CLIProxyAPIServiceBundle/CLIProxyAPI")
     }
 
+    private func configuredRepositoryRoot(from path: String?) -> URL? {
+        guard let trimmed = path?.trimmingCharacters(in: .whitespacesAndNewlines),
+              trimmed.isEmpty == false else {
+            return nil
+        }
+        let url = URL(fileURLWithPath: trimmed, isDirectory: true)
+        let mainGo = url
+            .appendingPathComponent("cmd", isDirectory: true)
+            .appendingPathComponent("server", isDirectory: true)
+            .appendingPathComponent("main.go")
+        return FileManager.default.fileExists(atPath: mainGo.path) ? url : nil
+    }
+
     func syncSnapshot(
         host: String,
         port: Int,
@@ -91,7 +104,7 @@ final class CLIProxyAPIProbeService {
         explicitRepoRootPath: String?,
         localAccounts: [TokenAccount]
     ) async throws -> CLIProxyAPISyncSnapshot {
-        let repoRootURL = self.service.resolveConfiguredRepoRoot(explicitPath: explicitRepoRootPath)
+        let repoRootURL = self.configuredRepositoryRoot(from: explicitRepoRootPath)
         var config = CLIProxyAPIServiceConfig(
             host: host,
             port: port,
