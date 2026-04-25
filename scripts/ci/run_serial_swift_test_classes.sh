@@ -117,6 +117,23 @@ isolated_classes=(
   "CodexkitAppTests.CLIProxyAPIProbeServiceTests"
 )
 
+test_case_classes=(
+  "CodexkitAppTests.CLIProxyAPIServiceTests"
+  "CodexkitAppTests.UpdateCoordinatorTests"
+)
+
+contains_class() {
+  local needle="$1"
+  shift
+  local candidate
+  for candidate in "$@"; do
+    if [[ "$needle" == "$candidate" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 remaining_classes=()
 for class_name in "${test_classes[@]}"; do
   skip=0
@@ -135,7 +152,7 @@ run_batch "release-critical classes" "${early_classes[@]}"
 run_batch "isolated CLIProxyAPI probe suite" "${isolated_classes[@]}"
 
 for class_name in "${remaining_classes[@]}"; do
-  if [[ "$class_name" == "CodexkitAppTests.CLIProxyAPIServiceTests" ]]; then
+  if contains_class "$class_name" "${test_case_classes[@]}"; then
     run_test_cases_for_class "$class_name"
   else
     run_batch "suite ${class_name}" "$class_name"
