@@ -1,8 +1,9 @@
 import AppKit
 import Combine
+import CryptoKit
 import Foundation
 
-private let hardcodedCodexkitReleasesURL = URL(string: "https://api.github.com/repos/lcc-project/Codexkit/releases")!
+private let hardcodedCodexkitReleasesURL = URL(string: "https://api.github.com/repos/Lcc1ccl/Codexkit/releases")!
 private let hardcodedCLIProxyAPILatestReleaseURL = URL(string: "https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest")!
 private let hardcodedCLIProxyAPIReleasePageURL = URL(string: "https://github.com/router-for-me/CLIProxyAPI/releases/latest")!
 
@@ -69,6 +70,10 @@ protocol AppUpdateCapabilityEvaluating {
 
 protocol AppUpdateActionExecuting {
     func execute(_ availability: AppUpdateAvailability) async throws
+}
+
+protocol AppUpdateRelaunching {
+    func relaunch(appURL: URL) throws
 }
 
 enum CLIProxyAPIArtifactFormat: String, Equatable {
@@ -605,19 +610,288 @@ enum AppUpdateArtifactSelector {
 }
 
 struct LiveAppUpdateActionExecutor: AppUpdateActionExecuting {
+    var session: URLSession = .shared
+    var fileManager: FileManager = .default
+    var currentBundleURL: URL = Bundle.main.bundleURL
+    var updateRootURL: URL = CodexPaths.codexBarRoot.appendingPathComponent("app-updates", isDirectory: true)
+    var relauncher: AppUpdateRelaunching = SystemAppUpdateRelauncher()
+
     func execute(_ availability: AppUpdateAvailability) async throws {
-        guard availability.isAutomaticUpdateAllowed == false else {
-            throw AppUpdateError.automaticUpdateUnavailable
+        let installedAppURL = try await self.install(availability)
+        try self.relauncher.relaunch(appURL: installedAppURL)
+    }
+
+    @discardableResult
+    func install(_ availability: AppUpdateAvailability) async throws -> URL {
+        try self.fileManager.createDirectory(at: self.updateRootURL, withIntermediateDirectories: true)
+
+        let downloadedArtifactURL = try await self.download(availability.selectedArtifact, version: availability.release.version)
+        let stagedAppURL = try self.stageApp(
+            artifact: availability.selectedArtifact,
+            downloadedArtifactURL: downloadedArtifactURL,
+            version: availability.release.version
+        )
+        return try self.replaceCurrentApp(with: stagedAppURL)
+    }
+
+    private func download(
+        _ artifact: AppUpdateArtifact,
+        version: String
+    ) async throws -> URL {
+        let safeVersion = Self.safePathComponent(version)
+        let downloadDirectoryURL = self.updateRootURL
+            .appendingPathComponent("downloads", isDirectory: true)
+            .appendingPathComponent(safeVersion, isDirectory: true)
+        try self.fileManager.createDirectory(at: downloadDirectoryURL, withIntermediateDirectories: true)
+
+        let fileName = artifact.downloadURL.lastPathComponent.isEmpty
+            ? "codexkit-\(safeVersion).\(artifact.format.rawValue)"
+            : artifact.downloadURL.lastPathComponent
+        let downloadedArtifactURL = downloadDirectoryURL
+            .appendingPathComponent(Self.safePathComponent(fileName))
+
+        let (data, response) = try await self.session.data(from: artifact.downloadURL)
+        if let http = response as? HTTPURLResponse,
+           (200...299).contains(http.statusCode) == false {
+            throw NSError(
+                domain: "CodexkitAppUpdate",
+                code: http.statusCode,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "Codexkit update artifact download failed with status code \(http.statusCode).",
+                ]
+            )
         }
 
-        guard NSWorkspace.shared.open(availability.selectedArtifact.downloadURL) else {
-            throw AppUpdateError.failedToOpenDownloadURL(availability.selectedArtifact.downloadURL)
+        if let expectedSHA256 = artifact.sha256?.trimmingCharacters(in: .whitespacesAndNewlines),
+           expectedSHA256.isEmpty == false {
+            let actualSHA256 = Self.sha256Hex(data)
+            guard actualSHA256.caseInsensitiveCompare(expectedSHA256) == .orderedSame else {
+                throw NSError(
+                    domain: "CodexkitAppUpdate",
+                    code: 1001,
+                    userInfo: [
+                        NSLocalizedDescriptionKey: "Codexkit update artifact checksum mismatch.",
+                    ]
+                )
+            }
         }
+
+        try data.write(to: downloadedArtifactURL, options: .atomic)
+        return downloadedArtifactURL
+    }
+
+    private func stageApp(
+        artifact: AppUpdateArtifact,
+        downloadedArtifactURL: URL,
+        version: String
+    ) throws -> URL {
+        let stagingRootURL = self.updateRootURL
+            .appendingPathComponent("staged", isDirectory: true)
+            .appendingPathComponent("\(Self.safePathComponent(version))-\(UUID().uuidString)", isDirectory: true)
+        try self.fileManager.createDirectory(at: stagingRootURL, withIntermediateDirectories: true)
+
+        switch artifact.format {
+        case .zip:
+            try self.runTool(
+                executablePath: "/usr/bin/ditto",
+                arguments: ["-x", "-k", downloadedArtifactURL.path, stagingRootURL.path]
+            )
+            return try self.findAppBundle(in: stagingRootURL)
+        case .dmg:
+            return try self.stageAppFromDMG(
+                downloadedArtifactURL: downloadedArtifactURL,
+                stagingRootURL: stagingRootURL
+            )
+        }
+    }
+
+    private func stageAppFromDMG(
+        downloadedArtifactURL: URL,
+        stagingRootURL: URL
+    ) throws -> URL {
+        let mountURL = self.updateRootURL
+            .appendingPathComponent("mounts", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try self.fileManager.createDirectory(at: mountURL, withIntermediateDirectories: true)
+
+        var didAttach = false
+        defer {
+            if didAttach {
+                try? self.runTool(
+                    executablePath: "/usr/bin/hdiutil",
+                    arguments: ["detach", mountURL.path, "-quiet"]
+                )
+            }
+            try? self.fileManager.removeItem(at: mountURL)
+        }
+
+        do {
+            try self.runTool(
+                executablePath: "/usr/bin/hdiutil",
+                arguments: ["attach", downloadedArtifactURL.path, "-nobrowse", "-readonly", "-mountpoint", mountURL.path]
+            )
+            didAttach = true
+            let mountedAppURL = try self.findAppBundle(in: mountURL)
+            let copiedAppURL = stagingRootURL.appendingPathComponent(mountedAppURL.lastPathComponent, isDirectory: true)
+            if self.fileManager.fileExists(atPath: copiedAppURL.path) {
+                try self.fileManager.removeItem(at: copiedAppURL)
+            }
+            try self.fileManager.copyItem(at: mountedAppURL, to: copiedAppURL)
+            return copiedAppURL
+        } catch {
+            throw error
+        }
+    }
+
+    private func replaceCurrentApp(with stagedAppURL: URL) throws -> URL {
+        let targetAppURL = self.currentBundleURL.standardizedFileURL
+        guard targetAppURL.pathExtension.lowercased() == "app" else {
+            throw NSError(
+                domain: "CodexkitAppUpdate",
+                code: 1002,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "Codexkit is not currently running from an app bundle.",
+                ]
+            )
+        }
+
+        guard self.fileManager.fileExists(atPath: stagedAppURL.appendingPathComponent("Contents", isDirectory: true).path) else {
+            throw NSError(
+                domain: "CodexkitAppUpdate",
+                code: 1003,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "Codexkit update artifact did not contain a valid app bundle.",
+                ]
+            )
+        }
+
+        let parentURL = targetAppURL.deletingLastPathComponent()
+        try self.fileManager.createDirectory(at: parentURL, withIntermediateDirectories: true)
+        let transactionID = UUID().uuidString
+        let installingURL = parentURL
+            .appendingPathComponent(".\(targetAppURL.lastPathComponent).installing-\(transactionID)", isDirectory: true)
+        let backupURL = parentURL
+            .appendingPathComponent(".\(targetAppURL.lastPathComponent).backup-\(transactionID)", isDirectory: true)
+
+        if self.fileManager.fileExists(atPath: installingURL.path) {
+            try self.fileManager.removeItem(at: installingURL)
+        }
+        try self.fileManager.copyItem(at: stagedAppURL, to: installingURL)
+
+        do {
+            if self.fileManager.fileExists(atPath: targetAppURL.path) {
+                try self.fileManager.moveItem(at: targetAppURL, to: backupURL)
+            }
+            try self.fileManager.moveItem(at: installingURL, to: targetAppURL)
+            if self.fileManager.fileExists(atPath: backupURL.path) {
+                try self.fileManager.removeItem(at: backupURL)
+            }
+            return targetAppURL
+        } catch {
+            if self.fileManager.fileExists(atPath: targetAppURL.path) == false,
+               self.fileManager.fileExists(atPath: backupURL.path) {
+                try? self.fileManager.moveItem(at: backupURL, to: targetAppURL)
+            }
+            if self.fileManager.fileExists(atPath: installingURL.path) {
+                try? self.fileManager.removeItem(at: installingURL)
+            }
+            throw error
+        }
+    }
+
+    private func findAppBundle(in rootURL: URL) throws -> URL {
+        if let directMatch = try self.fileManager
+            .contentsOfDirectory(at: rootURL, includingPropertiesForKeys: nil)
+            .first(where: { $0.pathExtension.lowercased() == "app" }) {
+            return directMatch
+        }
+
+        let enumerator = self.fileManager.enumerator(
+            at: rootURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+        while let candidate = enumerator?.nextObject() as? URL {
+            if candidate.pathExtension.lowercased() == "app" {
+                return candidate
+            }
+        }
+
+        throw NSError(
+            domain: "CodexkitAppUpdate",
+            code: 1004,
+            userInfo: [
+                NSLocalizedDescriptionKey: "Codexkit update artifact did not contain a .app bundle.",
+            ]
+        )
+    }
+
+    private func runTool(
+        executablePath: String,
+        arguments: [String]
+    ) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = arguments
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let output = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw NSError(
+                domain: "CodexkitAppUpdate",
+                code: Int(process.terminationStatus),
+                userInfo: [
+                    NSLocalizedDescriptionKey: output?.isEmpty == false
+                        ? output!
+                        : "Update tool \(executablePath) failed with status \(process.terminationStatus).",
+                ]
+            )
+        }
+    }
+
+    private static func safePathComponent(_ value: String) -> String {
+        let safe = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        return safe.isEmpty ? UUID().uuidString : safe
+    }
+
+    private static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+private struct SystemAppUpdateRelauncher: AppUpdateRelaunching {
+    func relaunch(appURL: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = [
+            "-c",
+            "sleep 0.5; /usr/bin/open -n \"$1\"",
+            "codexkit-relaunch",
+            appURL.path,
+        ]
+        try process.run()
+        NSApp.terminate(nil)
     }
 }
 
 struct LiveCLIProxyAPIUpdateActionExecutor: CLIProxyAPIUpdateActionExecuting {
     var service: CLIProxyAPIService = .shared
+    var restoreRuntimeAfterInstall: @MainActor () -> Bool = {
+        let settings = TokenStore.shared.config.desktop.cliProxyAPI
+        guard settings.enabled else { return false }
+        return CLIProxyAPIRuntimeController.shared.applyConfiguration(settings)
+    }
 
     func execute(_ availability: CLIProxyAPIUpdateAvailability) async throws {
         guard let artifact = availability.release.artifact else {
@@ -627,6 +901,7 @@ struct LiveCLIProxyAPIUpdateActionExecutor: CLIProxyAPIUpdateActionExecuting {
             version: availability.release.version,
             artifact: artifact
         )
+        _ = await self.restoreRuntimeAfterInstall()
     }
 }
 
@@ -661,7 +936,7 @@ final class UpdateCoordinator: ObservableObject {
             capabilityEvaluator: DefaultAppUpdateCapabilityEvaluator(
                 signatureInspector: LocalCodesignSignatureInspector(),
                 gatekeeperInspector: LocalGatekeeperInspector(),
-                automaticUpdaterAvailable: false
+                automaticUpdaterAvailable: true
             ),
             actionExecutor: LiveAppUpdateActionExecutor(),
             cliProxyAPIInstalledVersionProvider: LocalCLIProxyAPIInstalledVersionProvider(),

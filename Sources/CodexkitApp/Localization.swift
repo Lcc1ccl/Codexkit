@@ -402,13 +402,13 @@ enum L {
     }
     static var settingsUpdatesCodexkitSourceNote: String {
         zh
-            ? "Codexkit 更新检测硬编码为 GitHub Releases 列表扫描；自动安装开启后，自动检查命中更新会直接触发既有下载/安装动作。"
-            : "Codexkit update detection is hardcoded to scan GitHub Releases. When auto-install is enabled, automatic checks trigger the existing download/install action immediately."
+            ? "Codexkit 更新检测硬编码为 GitHub Releases 列表扫描；安装动作会下载 dmg/zip，替换当前 App 并重启。"
+            : "Codexkit update detection is hardcoded to scan GitHub Releases. Install downloads the dmg/zip asset, replaces the current app, and relaunches."
     }
     static var settingsUpdatesCLIProxyAPISourceNote: String {
         zh
-            ? "Cliproxyapi 更新检测硬编码为本地 `git describe --tags --always --dirty` + GitHub latest release；操作按钮会打开固定发布页。"
-            : "CLIProxyAPI update detection is hardcoded to local `git describe --tags --always --dirty` plus the GitHub latest-release endpoint; the action button opens the fixed release page."
+            ? "Cliproxyapi 更新检测硬编码为本地 managed/bundled 版本 + GitHub latest release；安装动作会下载并切换受管 runtime。"
+            : "CLIProxyAPI update detection uses the local managed/bundled version plus the GitHub latest-release endpoint; install downloads and switches the managed runtime."
     }
     static var settingsUpdatesReissueLimitNote: String {
         zh

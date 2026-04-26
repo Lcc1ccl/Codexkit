@@ -1,9 +1,17 @@
 import Foundation
+import CryptoKit
 import XCTest
 @testable import CodexkitApp
 
 @MainActor
 final class UpdateCoordinatorTests: CodexBarTestCase {
+    func testLiveEnvironmentUsesCurrentCodexkitReleaseEndpoint() {
+        XCTAssertEqual(
+            LiveAppUpdateEnvironment().githubReleasesURL,
+            URL(string: "https://api.github.com/repos/Lcc1ccl/Codexkit/releases")
+        )
+    }
+
     func testManualCheckStoresAvailableUpdateWithoutExecuting() async {
         let releaseLoader = MockReleaseLoader(release: self.makeRelease(version: "1.1.7"))
         let executor = MockUpdateExecutor()
@@ -349,7 +357,14 @@ final class UpdateCoordinatorTests: CodexBarTestCase {
             )
         }
         let service = CLIProxyAPIService(session: session)
-        let executor = LiveCLIProxyAPIUpdateActionExecutor(service: service)
+        var restoreCount = 0
+        let executor = LiveCLIProxyAPIUpdateActionExecutor(
+            service: service,
+            restoreRuntimeAfterInstall: {
+                restoreCount += 1
+                return true
+            }
+        )
         let release = CLIProxyAPIUpdateRelease(
             version: "v10.0.1",
             releasePageURL: URL(string: "https://example.com/releases/v10.0.1")!,
@@ -386,6 +401,104 @@ final class UpdateCoordinatorTests: CodexBarTestCase {
                     .path
             )
         )
+        XCTAssertEqual(restoreCount, 1)
+    }
+
+    func testLiveAppUpdateExecutorInstallsZipAndRelaunches() async throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let currentAppURL = root.appendingPathComponent("Codexkit.app", isDirectory: true)
+        let payloadAppURL = root
+            .appendingPathComponent("payload", isDirectory: true)
+            .appendingPathComponent("Codexkit.app", isDirectory: true)
+        let updateRootURL = root.appendingPathComponent("updates", isDirectory: true)
+
+        try self.writeMinimalAppBundle(at: currentAppURL, marker: "old")
+        try self.writeMinimalAppBundle(at: payloadAppURL, marker: "new")
+        let zipData = try self.makeAppZip(appURL: payloadAppURL)
+        let artifactURL = URL(string: "https://example.com/codexkit-1.2.0-macOS-arm64.zip")!
+        let session = self.makeMockSession()
+        MockURLProtocol.handler = { request in
+            XCTAssertEqual(request.url, artifactURL)
+            return (
+                HTTPURLResponse(url: artifactURL, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                zipData
+            )
+        }
+        let relauncher = MockAppUpdateRelauncher()
+        let executor = LiveAppUpdateActionExecutor(
+            session: session,
+            fileManager: .default,
+            currentBundleURL: currentAppURL,
+            updateRootURL: updateRootURL,
+            relauncher: relauncher
+        )
+
+        try await executor.execute(
+            AppUpdateAvailability(
+                currentVersion: "1.1.0",
+                release: self.makeRelease(
+                    version: "1.2.0",
+                    artifacts: [
+                        AppUpdateArtifact(
+                            architecture: .arm64,
+                            format: .zip,
+                            downloadURL: artifactURL,
+                            sha256: Self.sha256Hex(zipData)
+                        ),
+                    ]
+                ),
+                selectedArtifact: AppUpdateArtifact(
+                    architecture: .arm64,
+                    format: .zip,
+                    downloadURL: artifactURL,
+                    sha256: Self.sha256Hex(zipData)
+                ),
+                blockers: []
+            )
+        )
+
+        let marker = try String(
+            contentsOf: currentAppURL
+                .appendingPathComponent("Contents", isDirectory: true)
+                .appendingPathComponent("marker.txt"),
+            encoding: .utf8
+        )
+        XCTAssertEqual(marker, "new")
+        XCTAssertEqual(relauncher.launchedAppURL?.path, currentAppURL.path)
+    }
+
+    func testCLIProxyAPIManualInstallFailureDoesNotCrashWhenReleaseHasNoArtifact() async {
+        let coordinator = UpdateCoordinator(
+            releaseLoader: MockReleaseLoader(release: self.makeRelease(version: "1.1.5")),
+            environment: MockUpdateEnvironment(
+                currentVersion: "1.1.5",
+                architecture: .arm64
+            ),
+            capabilityEvaluator: MockCapabilityEvaluator(blockers: []),
+            actionExecutor: MockUpdateExecutor(),
+            cliProxyAPIInstalledVersionProvider: MockCLIProxyAPIInstalledVersionProvider(installedVersion: "v1.1.0"),
+            cliProxyAPIReleaseLoader: MockCLIProxyAPIReleaseLoader(
+                release: CLIProxyAPIUpdateRelease(
+                    version: "v1.2.0",
+                    releasePageURL: URL(string: "https://example.com/cliproxyapi/releases/v1.2.0")!,
+                    artifact: nil
+                )
+            ),
+            cliProxyAPIActionExecutor: LiveCLIProxyAPIUpdateActionExecutor(
+                restoreRuntimeAfterInstall: { false }
+            ),
+            automaticCheckScheduler: MockAutomaticCheckScheduler(),
+            desktopSettingsProvider: { CodexBarDesktopSettings() }
+        )
+
+        await coordinator.checkCLIProxyAPIForUpdates(trigger: .manual)
+        await coordinator.handleCLIProxyAPIAction()
+
+        guard case let .failed(message) = coordinator.cliProxyAPIState else {
+            return XCTFail("Expected CLIProxyAPI failed state instead of a crash")
+        }
+        XCTAssertEqual(message, L.updateErrorNoCompatibleArtifact("Apple Silicon"))
     }
 
     func testManualCheckShowsUpToDateStateWhenVersionsMatch() async {
@@ -567,7 +680,7 @@ final class UpdateCoordinatorTests: CodexBarTestCase {
         let release = try await loader.loadLatestRelease()
 
         XCTAssertEqual(release.version, "1.1.9")
-        XCTAssertEqual(release.deliveryMode, .guidedDownload)
+        XCTAssertEqual(release.deliveryMode, .automatic)
         XCTAssertEqual(release.artifacts.count, 2)
         XCTAssertEqual(release.artifacts[0].architecture, .universal)
         XCTAssertEqual(release.artifacts[0].format, .dmg)
@@ -757,6 +870,37 @@ final class UpdateCoordinatorTests: CodexBarTestCase {
         )
     }
 
+    private func writeMinimalAppBundle(at url: URL, marker: String) throws {
+        let contentsURL = url.appendingPathComponent("Contents", isDirectory: true)
+        let macOSURL = contentsURL.appendingPathComponent("MacOS", isDirectory: true)
+        try FileManager.default.createDirectory(at: macOSURL, withIntermediateDirectories: true)
+        try Data(marker.utf8).write(to: contentsURL.appendingPathComponent("marker.txt"))
+        let executableURL = macOSURL.appendingPathComponent("Codexkit")
+        try self.writeExecutable(at: executableURL)
+    }
+
+    private func makeAppZip(appURL: URL) throws -> Data {
+        let archiveURL = appURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("codexkit.zip")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        process.arguments = ["-c", "-k", "--keepParent", appURL.path, archiveURL.path]
+        let errorPipe = Pipe()
+        process.standardError = errorPipe
+        try process.run()
+        process.waitUntilExit()
+        if process.terminationStatus != 0 {
+            let data = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            XCTFail(String(data: data, encoding: .utf8) ?? "ditto failed")
+        }
+        return try Data(contentsOf: archiveURL)
+    }
+
+    private static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
     private func makeCLIProxyAPITarball() throws -> Data {
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -901,5 +1045,13 @@ private final class MockCLIProxyAPIUpdateExecutor: CLIProxyAPIUpdateActionExecut
             throw error
         }
         self.executed.append(availability)
+    }
+}
+
+private final class MockAppUpdateRelauncher: AppUpdateRelaunching {
+    private(set) var launchedAppURL: URL?
+
+    func relaunch(appURL: URL) throws {
+        self.launchedAppURL = appURL
     }
 }

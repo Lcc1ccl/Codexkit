@@ -94,7 +94,7 @@ struct GitHubReleaseIndexEntry: Decodable, Equatable {
             summary: Self.firstNonEmpty(self.body, fallback: self.name),
             releaseNotesURL: self.htmlURL,
             downloadPageURL: self.htmlURL,
-            deliveryMode: .guidedDownload,
+            deliveryMode: .automatic,
             minimumAutomaticUpdateVersion: nil,
             artifacts: artifacts
         )
