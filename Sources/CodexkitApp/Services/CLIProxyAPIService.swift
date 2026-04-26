@@ -149,12 +149,21 @@ final class CLIProxyAPIService {
     static var bundledServiceRelativePath: String { "CLIProxyAPIServiceBundle/CLIProxyAPI" }
     static var bundledManifestRelativePath: String { "CLIProxyAPIServiceBundle/bundle-manifest.json" }
     static var bundledExecutableRelativePath: String {
+        "CLIProxyAPIServiceBundle/bin/\(Self.bundledExecutableName)"
+    }
+    private static var bundledExecutablePathInsideBundle: String {
+        "bin/\(Self.bundledExecutableName)"
+    }
+    private static var packageResourceBundleName: String {
+        "Codexkit_CodexkitApp.bundle"
+    }
+    private static var bundledExecutableName: String {
         #if arch(arm64)
-        "CLIProxyAPIServiceBundle/bin/cli-proxy-api-darwin-arm64"
+        "cli-proxy-api-darwin-arm64"
         #elseif arch(x86_64)
-        "CLIProxyAPIServiceBundle/bin/cli-proxy-api-darwin-x86_64"
+        "cli-proxy-api-darwin-x86_64"
         #else
-        "CLIProxyAPIServiceBundle/bin/cli-proxy-api-darwin-universal"
+        "cli-proxy-api-darwin-universal"
         #endif
     }
 
@@ -543,12 +552,13 @@ final class CLIProxyAPIService {
             }
         }
 
-        if searchRoots == nil,
-           let bundledResourceURL = Bundle.module.resourceURL?
-            .appendingPathComponent(Self.bundledExecutableRelativePath),
-           self.isExecutableFile(bundledResourceURL) {
-            return bundledResourceURL
+        for bundleRoot in self.bundledBundleRootCandidates(searchRoots: searchRoots) {
+            let packagedCandidate = bundleRoot.appendingPathComponent(Self.bundledExecutablePathInsideBundle)
+            if self.isExecutableFile(packagedCandidate) {
+                return packagedCandidate
+            }
         }
+
         return nil
     }
 
@@ -820,15 +830,14 @@ final class CLIProxyAPIService {
                         .appendingPathComponent("Bundled", isDirectory: true)
                         .appendingPathComponent("CLIProxyAPIServiceBundle", isDirectory: true)
                 )
+                for packagedCandidate in self.packagedBundledBundleRootCandidates(from: current) {
+                    appendExistingDirectory(packagedCandidate)
+                }
 
                 let parent = current.deletingLastPathComponent()
                 if parent.path == current.path { break }
                 current = parent
             }
-        }
-
-        if searchRoots == nil {
-            appendExistingDirectory(Bundle.module.resourceURL?.appendingPathComponent("CLIProxyAPIServiceBundle", isDirectory: true))
         }
 
         return candidates
@@ -869,6 +878,9 @@ final class CLIProxyAPIService {
                         .appendingPathComponent("CLIProxyAPIServiceBundle", isDirectory: true)
                         .appendingPathComponent("CLIProxyAPI", isDirectory: true)
                 )
+                for packagedCandidate in self.packagedBundledBundleRootCandidates(from: current) {
+                    appendExistingDirectory(packagedCandidate.appendingPathComponent("CLIProxyAPI", isDirectory: true))
+                }
 
                 let parent = current.deletingLastPathComponent()
                 if parent.path == current.path { break }
@@ -876,10 +888,31 @@ final class CLIProxyAPIService {
             }
         }
 
-        if searchRoots == nil {
-            appendExistingDirectory(Bundle.module.resourceURL?.appendingPathComponent(Self.bundledServiceRelativePath, isDirectory: true))
-        }
+        return candidates
+    }
 
+    private func packagedBundledBundleRootCandidates(from current: URL) -> [URL] {
+        var candidates = [
+            current
+                .appendingPathComponent("Contents", isDirectory: true)
+                .appendingPathComponent("Resources", isDirectory: true)
+                .appendingPathComponent(Self.packageResourceBundleName, isDirectory: true)
+                .appendingPathComponent("CLIProxyAPIServiceBundle", isDirectory: true),
+            current
+                .appendingPathComponent("Resources", isDirectory: true)
+                .appendingPathComponent(Self.packageResourceBundleName, isDirectory: true)
+                .appendingPathComponent("CLIProxyAPIServiceBundle", isDirectory: true),
+            current
+                .appendingPathComponent(Self.packageResourceBundleName, isDirectory: true)
+                .appendingPathComponent("CLIProxyAPIServiceBundle", isDirectory: true),
+        ]
+
+        if current.lastPathComponent == Self.packageResourceBundleName {
+            candidates.append(current.appendingPathComponent("CLIProxyAPIServiceBundle", isDirectory: true))
+        }
+        if current.lastPathComponent == "CLIProxyAPIServiceBundle" {
+            candidates.append(current)
+        }
         return candidates
     }
 

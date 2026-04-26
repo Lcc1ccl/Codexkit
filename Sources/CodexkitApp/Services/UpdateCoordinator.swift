@@ -4,6 +4,7 @@ import CryptoKit
 import Foundation
 
 private let hardcodedCodexkitReleasesURL = URL(string: "https://api.github.com/repos/Lcc1ccl/Codexkit/releases")!
+private let hardcodedCodexkitLatestReleasePageURL = URL(string: "https://github.com/Lcc1ccl/Codexkit/releases/latest")!
 private let hardcodedCLIProxyAPILatestReleaseURL = URL(string: "https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest")!
 private let hardcodedCLIProxyAPIReleasePageURL = URL(string: "https://github.com/router-for-me/CLIProxyAPI/releases/latest")!
 
@@ -367,6 +368,9 @@ struct LiveCLIProxyAPIReleaseLoader: CLIProxyAPIReleaseLoading {
             throw AppUpdateError.invalidResponse
         }
         guard (200...299).contains(httpResponse.statusCode) else {
+            if httpResponse.statusCode == 403 || httpResponse.statusCode == 429 {
+                return try await self.loadLatestReleaseFromReleasePageFallback()
+            }
             throw AppUpdateError.unexpectedStatusCode(httpResponse.statusCode)
         }
 
@@ -394,6 +398,83 @@ struct LiveCLIProxyAPIReleaseLoader: CLIProxyAPIReleaseLoading {
             artifact: selectedArtifact
         )
     }
+
+    private func loadLatestReleaseFromReleasePageFallback() async throws -> CLIProxyAPIUpdateRelease {
+        var request = URLRequest(url: hardcodedCLIProxyAPIReleasePageURL)
+        request.setValue("text/html", forHTTPHeaderField: "Accept")
+        request.setValue("CLIProxyAPI", forHTTPHeaderField: "User-Agent")
+
+        let (_, response) = try await self.session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw AppUpdateError.invalidResponse
+        }
+        guard (200...399).contains(httpResponse.statusCode) else {
+            throw AppUpdateError.unexpectedStatusCode(httpResponse.statusCode)
+        }
+
+        let resolvedURL = self.resolvedLatestReleaseURL(from: httpResponse)
+        guard let tag = Self.releaseTag(from: resolvedURL),
+              AppSemanticVersion(tag) != nil else {
+            throw AppUpdateError.invalidResponse
+        }
+
+        return CLIProxyAPIUpdateRelease(
+            version: tag,
+            releasePageURL: resolvedURL,
+            artifact: Self.fallbackArtifact(tag: tag, architecture: self.architecture)
+        )
+    }
+
+    private func resolvedLatestReleaseURL(from response: HTTPURLResponse) -> URL {
+        if let responseURL = response.url,
+           Self.releaseTag(from: responseURL) != nil {
+            return responseURL
+        }
+        if let location = response.value(forHTTPHeaderField: "Location"),
+           let locationURL = URL(string: location),
+           Self.releaseTag(from: locationURL) != nil {
+            return locationURL
+        }
+        return hardcodedCLIProxyAPIReleasePageURL
+    }
+
+    private static func releaseTag(from url: URL) -> String? {
+        let components = url.pathComponents
+        guard let tagIndex = components.firstIndex(of: "tag"),
+              components.index(after: tagIndex) < components.endIndex else {
+            return nil
+        }
+
+        let tag = components[components.index(after: tagIndex)]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return tag.isEmpty ? nil : tag
+    }
+
+    private static func fallbackArtifact(
+        tag: String,
+        architecture: UpdateArtifactArchitecture
+    ) -> CLIProxyAPIReleaseArtifact {
+        let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+        let resolvedArchitecture: UpdateArtifactArchitecture
+        let architectureSlug: String
+        switch architecture {
+        case .x86_64:
+            resolvedArchitecture = .x86_64
+            architectureSlug = "amd64"
+        case .arm64, .universal:
+            resolvedArchitecture = .arm64
+            architectureSlug = "arm64"
+        }
+
+        let name = "CLIProxyAPI_\(version)_darwin_\(architectureSlug).tar.gz"
+        return CLIProxyAPIReleaseArtifact(
+            name: name,
+            downloadURL: URL(string: "https://github.com/router-for-me/CLIProxyAPI/releases/download/\(tag)/\(name)")!,
+            architecture: resolvedArchitecture,
+            format: .tarGzip,
+            sha256: nil
+        )
+    }
 }
 
 struct LiveGitHubReleasesUpdateLoader: AppUpdateReleaseLoading {
@@ -414,6 +495,9 @@ struct LiveGitHubReleasesUpdateLoader: AppUpdateReleaseLoading {
             throw AppUpdateError.invalidResponse
         }
         guard (200...299).contains(httpResponse.statusCode) else {
+            if httpResponse.statusCode == 403 || httpResponse.statusCode == 429 {
+                return try await self.loadLatestReleaseFromReleasePageFallback()
+            }
             throw AppUpdateError.unexpectedStatusCode(httpResponse.statusCode)
         }
 
@@ -432,6 +516,114 @@ struct LiveGitHubReleasesUpdateLoader: AppUpdateReleaseLoading {
         }
 
         return release
+    }
+
+    private func loadLatestReleaseFromReleasePageFallback() async throws -> AppUpdateRelease {
+        var request = URLRequest(url: hardcodedCodexkitLatestReleasePageURL)
+        request.setValue("text/html", forHTTPHeaderField: "Accept")
+        request.setValue("Codexkit", forHTTPHeaderField: "User-Agent")
+
+        let (_, response) = try await self.session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw AppUpdateError.invalidResponse
+        }
+        guard (200...399).contains(httpResponse.statusCode) else {
+            throw AppUpdateError.unexpectedStatusCode(httpResponse.statusCode)
+        }
+
+        let resolvedURL = self.resolvedLatestReleaseURL(from: httpResponse)
+        guard let tag = Self.releaseTag(from: resolvedURL) else {
+            throw AppUpdateError.invalidResponse
+        }
+
+        return try Self.fallbackRelease(tag: tag, releaseURL: resolvedURL)
+    }
+
+    private func resolvedLatestReleaseURL(from response: HTTPURLResponse) -> URL {
+        if let responseURL = response.url,
+           Self.releaseTag(from: responseURL) != nil {
+            return responseURL
+        }
+        if let location = response.value(forHTTPHeaderField: "Location"),
+           let locationURL = URL(string: location),
+           Self.releaseTag(from: locationURL) != nil {
+            return locationURL
+        }
+        return hardcodedCodexkitLatestReleasePageURL
+    }
+
+    private static func releaseTag(from url: URL) -> String? {
+        let components = url.pathComponents
+        guard let tagIndex = components.firstIndex(of: "tag"),
+              components.index(after: tagIndex) < components.endIndex else {
+            return nil
+        }
+
+        let tag = components[components.index(after: tagIndex)]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return tag.isEmpty ? nil : tag
+    }
+
+    private static func fallbackRelease(tag: String, releaseURL: URL) throws -> AppUpdateRelease {
+        let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+        guard version.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+              AppSemanticVersion(version) != nil else {
+            throw AppUpdateError.invalidReleaseVersion(tag)
+        }
+
+        let downloadBaseURL = URL(string: "https://github.com/Lcc1ccl/Codexkit/releases/download/\(tag)/")!
+        let artifacts: [AppUpdateArtifact] = [
+            Self.fallbackArtifact(
+                version: version,
+                architecture: .arm64,
+                format: .dmg,
+                downloadBaseURL: downloadBaseURL
+            ),
+            Self.fallbackArtifact(
+                version: version,
+                architecture: .arm64,
+                format: .zip,
+                downloadBaseURL: downloadBaseURL
+            ),
+            Self.fallbackArtifact(
+                version: version,
+                architecture: .x86_64,
+                format: .dmg,
+                downloadBaseURL: downloadBaseURL
+            ),
+            Self.fallbackArtifact(
+                version: version,
+                architecture: .x86_64,
+                format: .zip,
+                downloadBaseURL: downloadBaseURL
+            ),
+        ]
+
+        return AppUpdateRelease(
+            version: version,
+            publishedAt: nil,
+            summary: nil,
+            releaseNotesURL: releaseURL,
+            downloadPageURL: releaseURL,
+            deliveryMode: .automatic,
+            minimumAutomaticUpdateVersion: nil,
+            artifacts: artifacts
+        )
+    }
+
+    private static func fallbackArtifact(
+        version: String,
+        architecture: UpdateArtifactArchitecture,
+        format: UpdateArtifactFormat,
+        downloadBaseURL: URL
+    ) -> AppUpdateArtifact {
+        let filename = "codexkit-\(version)-macOS-\(architecture.rawValue).\(format.rawValue)"
+        return AppUpdateArtifact(
+            architecture: architecture,
+            format: format,
+            downloadURL: downloadBaseURL.appendingPathComponent(filename),
+            sha256: nil
+        )
     }
 }
 

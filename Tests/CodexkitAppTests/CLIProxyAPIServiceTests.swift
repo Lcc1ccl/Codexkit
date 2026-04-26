@@ -295,6 +295,72 @@ final class CLIProxyAPIServiceTests: CodexBarTestCase {
         XCTAssertEqual(detected?.path, executable.path)
     }
 
+    func testResolveBundledRuntimeDescriptorFindsPackagedResourceBundle() throws {
+        try self.skipGitHubBundledRuntimeFixtureStall()
+
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let appURL = root.appendingPathComponent("Codexkit.app", isDirectory: true)
+        let bundleRoot = appURL
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("Resources", isDirectory: true)
+            .appendingPathComponent("Codexkit_CodexkitApp.bundle", isDirectory: true)
+            .appendingPathComponent("CLIProxyAPIServiceBundle", isDirectory: true)
+        let bundledRepo = bundleRoot.appendingPathComponent("CLIProxyAPI", isDirectory: true)
+        let mainGo = bundledRepo
+            .appendingPathComponent("cmd", isDirectory: true)
+            .appendingPathComponent("server", isDirectory: true)
+            .appendingPathComponent("main.go")
+
+        try FileManager.default.createDirectory(
+            at: mainGo.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("package main".utf8).write(to: mainGo)
+        try Data(
+            """
+            {"source":"forks/CLIProxyAPI","delivery":"bundled-service-binary","version":"packaged-version","executable_relative_path":"bin/cli-proxy-api-darwin-arm64","rootURL":"/tmp/unused"}
+            """.utf8
+        ).write(to: bundleRoot.appendingPathComponent("bundle-manifest.json"))
+
+        let service = CLIProxyAPIService(currentDirectoryURL: appURL)
+        let descriptor = service.resolveBundledRuntimeDescriptor()
+
+        XCTAssertEqual(descriptor?.version, "packaged-version")
+        XCTAssertEqual(descriptor?.rootURL?.path, bundledRepo.path)
+    }
+
+    func testBundledExecutableURLFindsPackagedResourceBundleExecutable() throws {
+        try self.skipGitHubBundledRuntimeFixtureStall()
+
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let appURL = root.appendingPathComponent("Codexkit.app", isDirectory: true)
+        let bundleRoot = appURL
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("Resources", isDirectory: true)
+            .appendingPathComponent("Codexkit_CodexkitApp.bundle", isDirectory: true)
+            .appendingPathComponent("CLIProxyAPIServiceBundle", isDirectory: true)
+        #if arch(arm64)
+        let executableName = "cli-proxy-api-darwin-arm64"
+        #elseif arch(x86_64)
+        let executableName = "cli-proxy-api-darwin-x86_64"
+        #else
+        let executableName = "cli-proxy-api-darwin-universal"
+        #endif
+        let executable = bundleRoot
+            .appendingPathComponent("bin", isDirectory: true)
+            .appendingPathComponent(executableName)
+        try FileManager.default.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: NSNumber(value: Int16(0o755))], ofItemAtPath: executable.path)
+
+        let service = CLIProxyAPIService(currentDirectoryURL: appURL)
+        let detected = service.bundledExecutableURL()
+
+        XCTAssertEqual(detected?.path, executable.path)
+    }
+
     func testEnsureRuntimeDirectoriesCreatesManagedRuntimeSubdirectories() throws {
         let service = CLIProxyAPIService()
 

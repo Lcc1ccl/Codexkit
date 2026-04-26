@@ -345,6 +345,53 @@ final class UpdateCoordinatorTests: CodexBarTestCase {
         XCTAssertEqual(release.artifact?.sha256, "bbb222")
     }
 
+    func testCLIProxyAPIReleaseLoaderFallsBackToLatestReleasePageWhenAPIForbidden() async throws {
+        let releasesURL = URL(string: "https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest")!
+        let latestURL = URL(string: "https://github.com/router-for-me/CLIProxyAPI/releases/latest")!
+        let tagURL = URL(string: "https://github.com/router-for-me/CLIProxyAPI/releases/tag/v6.9.38")!
+        let session = self.makeMockSession()
+        var requestedURLs: [URL] = []
+        MockURLProtocol.handler = { request in
+            requestedURLs.append(try XCTUnwrap(request.url))
+            if request.url == releasesURL {
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/vnd.github+json")
+                return (
+                    HTTPURLResponse(url: releasesURL, statusCode: 403, httpVersion: nil, headerFields: nil)!,
+                    Data(#"{"message":"API rate limit exceeded"}"#.utf8)
+                )
+            }
+            if request.url == latestURL {
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "text/html")
+                return (
+                    HTTPURLResponse(url: tagURL, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    Data()
+                )
+            }
+            XCTFail("Unexpected URL: \(request.url?.absoluteString ?? "<nil>")")
+            return (
+                HTTPURLResponse(url: request.url ?? releasesURL, statusCode: 404, httpVersion: nil, headerFields: nil)!,
+                Data()
+            )
+        }
+
+        let release = try await LiveCLIProxyAPIReleaseLoader(
+            session: session,
+            architecture: .arm64
+        ).loadLatestRelease()
+
+        XCTAssertEqual(requestedURLs, [releasesURL, latestURL])
+        XCTAssertEqual(release.version, "v6.9.38")
+        XCTAssertEqual(release.releasePageURL, tagURL)
+        XCTAssertEqual(release.artifact?.name, "CLIProxyAPI_6.9.38_darwin_arm64.tar.gz")
+        XCTAssertEqual(release.artifact?.architecture, .arm64)
+        XCTAssertEqual(release.artifact?.format, .tarGzip)
+        XCTAssertEqual(
+            release.artifact?.downloadURL,
+            URL(string: "https://github.com/router-for-me/CLIProxyAPI/releases/download/v6.9.38/CLIProxyAPI_6.9.38_darwin_arm64.tar.gz")
+        )
+        XCTAssertNil(release.artifact?.sha256)
+    }
+
     func testCLIProxyAPIUpdateExecutorInstallsTarballIntoManagedRuntime() async throws {
         let artifactURL = URL(string: "https://example.com/CLIProxyAPI_10.0.1_darwin_arm64.tar.gz")!
         let tarballData = try self.makeCLIProxyAPITarball()
@@ -688,6 +735,59 @@ final class UpdateCoordinatorTests: CodexBarTestCase {
         XCTAssertEqual(release.artifacts[1].architecture, .x86_64)
         XCTAssertEqual(release.artifacts[1].format, .zip)
         XCTAssertEqual(release.artifacts[1].sha256, "def456")
+    }
+
+    func testGitHubReleasesLoaderFallsBackToLatestReleasePageWhenAPIForbidden() async throws {
+        let releasesURL = URL(string: "https://api.github.com/repos/Lcc1ccl/Codexkit/releases")!
+        let latestURL = URL(string: "https://github.com/Lcc1ccl/Codexkit/releases/latest")!
+        let tagURL = URL(string: "https://github.com/Lcc1ccl/Codexkit/releases/tag/v0.2.2")!
+        let session = self.makeMockSession()
+        var requestedURLs: [URL] = []
+        MockURLProtocol.handler = { request in
+            requestedURLs.append(try XCTUnwrap(request.url))
+            if request.url == releasesURL {
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/vnd.github+json")
+                return (
+                    HTTPURLResponse(url: releasesURL, statusCode: 403, httpVersion: nil, headerFields: nil)!,
+                    Data(#"{"message":"API rate limit exceeded"}"#.utf8)
+                )
+            }
+            if request.url == latestURL {
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "text/html")
+                return (
+                    HTTPURLResponse(url: tagURL, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    Data()
+                )
+            }
+            XCTFail("Unexpected URL: \(request.url?.absoluteString ?? "<nil>")")
+            return (
+                HTTPURLResponse(url: request.url ?? releasesURL, statusCode: 404, httpVersion: nil, headerFields: nil)!,
+                Data()
+            )
+        }
+
+        let release = try await LiveGitHubReleasesUpdateLoader(
+            environment: MockUpdateEnvironment(
+                currentVersion: "0.2.1",
+                architecture: .arm64,
+                githubReleasesURL: releasesURL
+            ),
+            session: session
+        ).loadLatestRelease()
+
+        XCTAssertEqual(requestedURLs, [releasesURL, latestURL])
+        XCTAssertEqual(release.version, "0.2.2")
+        XCTAssertEqual(release.releaseNotesURL, tagURL)
+        XCTAssertEqual(release.downloadPageURL, tagURL)
+        XCTAssertEqual(release.deliveryMode, .automatic)
+        XCTAssertEqual(release.artifacts.count, 4)
+        XCTAssertEqual(
+            release.artifacts.first {
+                $0.architecture == .arm64 && $0.format == .dmg
+            }?.downloadURL,
+            URL(string: "https://github.com/Lcc1ccl/Codexkit/releases/download/v0.2.2/codexkit-0.2.2-macOS-arm64.dmg")
+        )
+        XCTAssertTrue(release.artifacts.allSatisfy { $0.sha256 == nil })
     }
 
     func testManualCheckDoesNotTreatReissued119AsUpgradeable() async {
