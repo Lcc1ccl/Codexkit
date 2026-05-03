@@ -821,7 +821,9 @@ final class TokenStore: ObservableObject {
                     self.cliProxyAPIState.lastError ?? Self.apiServiceRuntimeApplyFailureFallback
                 )
             }
-            try await self.apiServiceRoutingProbeAction(probeConfig)
+            try await self.apiServiceRoutingProbeAction(
+                self.apiServiceRoutingProbeConfig(fallback: probeConfig)
+            )
             try self.configStore.save(synchronizedConfig)
             self.config = synchronizedConfig
             self.publishState()
@@ -981,6 +983,10 @@ final class TokenStore: ObservableObject {
             totalRequests: existingState.totalRequests,
             failedRequests: existingState.failedRequests,
             totalTokens: existingState.totalTokens,
+            requestsByDay: existingState.requestsByDay,
+            requestsByHour: existingState.requestsByHour,
+            tokensByDay: existingState.tokensByDay,
+            tokensByHour: existingState.tokensByHour,
             quotaSnapshot: existingState.quotaSnapshot,
             accountUsageItems: existingState.accountUsageItems,
             observedAuthFiles: existingState.observedAuthFiles
@@ -1559,6 +1565,15 @@ final class TokenStore: ObservableObject {
         return await runtimeController.adoptRunningServiceIfReusable(settings)
     }
 
+    private func apiServiceRoutingProbeConfig(
+        fallback: CLIProxyAPIServiceConfig
+    ) -> CLIProxyAPIServiceConfig {
+        guard self.cliProxyAPIState.runtimeProcessLikelyActive else {
+            return fallback
+        }
+        return self.cliProxyAPIState.config
+    }
+
     private func commitCLIProxyAPISettingsChange(
         updatedConfig: CodexBarConfig,
         previousConfig: CodexBarConfig,
@@ -1817,9 +1832,9 @@ final class TokenStore: ObservableObject {
         [502, 503, 504].contains(statusCode)
     }
 
-    private static func shouldRetryAPIServiceRoutingProbe(urlError: URLError) -> Bool {
+    static func shouldRetryAPIServiceRoutingProbe(urlError: URLError) -> Bool {
         switch urlError.code {
-        case .timedOut, .networkConnectionLost:
+        case .timedOut, .networkConnectionLost, .cannotConnectToHost:
             return true
         default:
             return false

@@ -97,7 +97,7 @@ final class CLIProxyAPIManagementServiceTests: XCTestCase {
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
             XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:8411/v0/management/usage")
             let body = """
-            {"usage":{"total_requests":12,"failure_count":3,"total_tokens":144,"apis":{"openai":{"total_requests":12,"total_tokens":144,"models":{"gpt-5.4":{"total_requests":12,"total_tokens":144,"details":[{"auth_index":"acct-alpha","failed":false,"tokens":{"total_tokens":120}},{"auth_index":"acct-alpha","failed":true,"tokens":{"total_tokens":24}}]}}}}},"failed_requests":3}
+            {"usage":{"total_requests":12,"failure_count":3,"total_tokens":144,"requests_by_day":{"2026-05-02":12},"requests_by_hour":{"2026-05-02T19":7},"tokens_by_day":{"2026-05-02":144},"tokens_by_hour":{"2026-05-02T19":90},"apis":{"openai":{"total_requests":12,"total_tokens":144,"models":{"gpt-5.4":{"total_requests":12,"total_tokens":144,"details":[{"timestamp":"2026-05-02T19:01:02Z","latency_ms":234,"source":"responses","auth_index":"acct-alpha","failed":false,"tokens":{"input_tokens":80,"output_tokens":30,"reasoning_tokens":10,"cached_tokens":4,"total_tokens":120}},{"timestamp":"2026-05-02T19:03:04Z","latency_ms":345,"source":"chat_completions","auth_index":"acct-alpha","failed":true,"tokens":{"input_tokens":20,"output_tokens":3,"reasoning_tokens":1,"cached_tokens":0,"total_tokens":24}}]}}}}},"failed_requests":3}
             """.data(using: .utf8)!
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
             return (response, body)
@@ -109,6 +109,18 @@ final class CLIProxyAPIManagementServiceTests: XCTestCase {
         XCTAssertEqual(usage.usage.total_tokens, 144)
         XCTAssertEqual(usage.usage.apis?["openai"]?.models?["gpt-5.4"]?.details?.count, 2)
         XCTAssertEqual(usage.usage.apis?["openai"]?.models?["gpt-5.4"]?.details?.last?.authIndex, "acct-alpha")
+        XCTAssertEqual(usage.usage.requests_by_day, ["2026-05-02": 12])
+        XCTAssertEqual(usage.usage.requests_by_hour, ["2026-05-02T19": 7])
+        XCTAssertEqual(usage.usage.tokens_by_day, ["2026-05-02": 144])
+        XCTAssertEqual(usage.usage.tokens_by_hour, ["2026-05-02T19": 90])
+        let firstDetail = try XCTUnwrap(usage.usage.apis?["openai"]?.models?["gpt-5.4"]?.details?.first)
+        XCTAssertEqual(firstDetail.timestamp, ISO8601DateFormatter().date(from: "2026-05-02T19:01:02Z"))
+        XCTAssertEqual(firstDetail.latencyMs, 234)
+        XCTAssertEqual(firstDetail.source, "responses")
+        XCTAssertEqual(firstDetail.tokens?.inputTokens, 80)
+        XCTAssertEqual(firstDetail.tokens?.outputTokens, 30)
+        XCTAssertEqual(firstDetail.tokens?.reasoningTokens, 10)
+        XCTAssertEqual(firstDetail.tokens?.cachedTokens, 4)
     }
 
     func testGetLogsUsesBearerSecretAndDecodesLines() async throws {
@@ -369,8 +381,28 @@ final class CLIProxyAPIManagementServiceTests: XCTestCase {
                                 total_requests: 2,
                                 total_tokens: 144,
                                 details: [
-                                    .init(authIndex: "acct-alpha", failed: false, tokens: .init(totalTokens: 120)),
-                                    .init(authIndex: "acct-alpha", failed: true, tokens: .init(totalTokens: 24))
+                                    .init(
+                                        authIndex: "acct-alpha",
+                                        failed: false,
+                                        tokens: .init(
+                                            inputTokens: 80,
+                                            outputTokens: 30,
+                                            reasoningTokens: 10,
+                                            cachedTokens: 4,
+                                            totalTokens: 120
+                                        )
+                                    ),
+                                    .init(
+                                        authIndex: "acct-alpha",
+                                        failed: true,
+                                        tokens: .init(
+                                            inputTokens: 20,
+                                            outputTokens: 3,
+                                            reasoningTokens: 1,
+                                            cachedTokens: 0,
+                                            totalTokens: 24
+                                        )
+                                    )
                                 ]
                             )
                         ]
@@ -405,6 +437,10 @@ final class CLIProxyAPIManagementServiceTests: XCTestCase {
         XCTAssertEqual(items[0].planType, "team")
         XCTAssertEqual(items[0].successRequests, 1)
         XCTAssertEqual(items[0].failedRequests, 1)
+        XCTAssertEqual(items[0].inputTokens, 100)
+        XCTAssertEqual(items[0].outputTokens, 33)
+        XCTAssertEqual(items[0].reasoningTokens, 11)
+        XCTAssertEqual(items[0].cachedTokens, 4)
         XCTAssertEqual(items[0].totalTokens, 144)
         XCTAssertEqual(items[0].fiveHourRemainingPercent, 100)
         XCTAssertEqual(items[0].weeklyRemainingPercent, 9)
@@ -610,6 +646,10 @@ final class CLIProxyAPIManagementServiceTests: XCTestCase {
                 weeklyRemainingPercent: 64,
                 successRequests: 2,
                 failedRequests: 0,
+                inputTokens: 20,
+                outputTokens: 5,
+                reasoningTokens: 3,
+                cachedTokens: 2,
                 totalTokens: 30
             ),
             CLIProxyAPIAccountUsageItem(
@@ -621,6 +661,10 @@ final class CLIProxyAPIManagementServiceTests: XCTestCase {
                 weeklyRemainingPercent: 72,
                 successRequests: 1,
                 failedRequests: 0,
+                inputTokens: 7,
+                outputTokens: 2,
+                reasoningTokens: 1,
+                cachedTokens: 0,
                 totalTokens: 10
             )
         ]
@@ -633,6 +677,10 @@ final class CLIProxyAPIManagementServiceTests: XCTestCase {
         XCTAssertEqual(groups[0].usageItems.map(\.planType), ["team", "plus"])
         XCTAssertEqual(groups[0].usageItems[0].successRequests, 5)
         XCTAssertEqual(groups[0].usageItems[0].failedRequests, 1)
+        XCTAssertEqual(groups[0].usageItems[0].inputTokens, 20)
+        XCTAssertEqual(groups[0].usageItems[0].outputTokens, 5)
+        XCTAssertEqual(groups[0].usageItems[0].reasoningTokens, 3)
+        XCTAssertEqual(groups[0].usageItems[0].cachedTokens, 2)
         XCTAssertEqual(groups[0].usageItems[0].totalTokens, 120)
         XCTAssertEqual(groups[0].usageItems[0].fiveHourRemainingPercent, 46)
         XCTAssertEqual(groups[0].usageItems[0].weeklyRemainingPercent, 64)

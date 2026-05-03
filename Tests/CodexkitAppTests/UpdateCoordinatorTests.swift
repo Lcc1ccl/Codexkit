@@ -219,10 +219,7 @@ final class UpdateCoordinatorTests: CodexBarTestCase {
 
     func testCLIProxyAPIManualCheckStoresAvailableUpdateWithoutExecuting() async {
         let cliReleaseLoader = MockCLIProxyAPIReleaseLoader(
-            release: CLIProxyAPIUpdateRelease(
-                version: "v1.2.0",
-                releasePageURL: URL(string: "https://example.com/cliproxyapi/releases/v1.2.0")!
-            )
+            release: self.makeCLIProxyAPIRelease(version: "v1.2.0")
         )
         let cliExecutor = MockCLIProxyAPIUpdateExecutor()
         let coordinator = UpdateCoordinator(
@@ -250,6 +247,80 @@ final class UpdateCoordinatorTests: CodexBarTestCase {
         }
         XCTAssertEqual(availability.installedVersion, "v1.1.0")
         XCTAssertEqual(availability.release.version, "v1.2.0")
+    }
+
+    func testCLIProxyAPIActionExecutesPendingUpdateWithoutRefetchingAndConverges() async {
+        let cliReleaseLoader = MockCLIProxyAPIReleaseLoader(
+            release: self.makeCLIProxyAPIRelease(version: "v1.2.0")
+        )
+        let cliExecutor = MockCLIProxyAPIUpdateExecutor()
+        let coordinator = UpdateCoordinator(
+            releaseLoader: MockReleaseLoader(release: self.makeRelease(version: "1.1.5")),
+            environment: MockUpdateEnvironment(
+                currentVersion: "1.1.5",
+                architecture: .arm64
+            ),
+            capabilityEvaluator: MockCapabilityEvaluator(blockers: []),
+            actionExecutor: MockUpdateExecutor(),
+            cliProxyAPIInstalledVersionProvider: MockCLIProxyAPIInstalledVersionProvider(installedVersion: "v1.1.0"),
+            cliProxyAPIReleaseLoader: cliReleaseLoader,
+            cliProxyAPIActionExecutor: cliExecutor,
+            automaticCheckScheduler: MockAutomaticCheckScheduler(),
+            desktopSettingsProvider: { CodexBarDesktopSettings() }
+        )
+
+        await coordinator.checkCLIProxyAPIForUpdates(trigger: .manual)
+        cliReleaseLoader.release = self.makeCLIProxyAPIRelease(version: "v1.1.0")
+
+        await coordinator.handleCLIProxyAPIAction()
+
+        XCTAssertEqual(cliReleaseLoader.loadCount, 1)
+        XCTAssertEqual(cliExecutor.executed.count, 1)
+        XCTAssertEqual(cliExecutor.executed.first?.release.version, "v1.2.0")
+        XCTAssertNil(coordinator.cliProxyAPIPendingAvailability)
+        guard case let .upToDate(installedVersion, checkedVersion) = coordinator.cliProxyAPIState else {
+            return XCTFail("Expected CLIProxyAPI upToDate state after successful install")
+        }
+        XCTAssertEqual(installedVersion, "v1.2.0")
+        XCTAssertEqual(checkedVersion, "v1.2.0")
+    }
+
+    func testCLIProxyAPIAutomaticCheckAutoInstallsAndConvergesWhenEnabled() async {
+        let cliReleaseLoader = MockCLIProxyAPIReleaseLoader(
+            release: self.makeCLIProxyAPIRelease(version: "v1.2.0")
+        )
+        let cliExecutor = MockCLIProxyAPIUpdateExecutor()
+        let coordinator = UpdateCoordinator(
+            releaseLoader: MockReleaseLoader(release: self.makeRelease(version: "1.1.5")),
+            environment: MockUpdateEnvironment(
+                currentVersion: "1.1.5",
+                architecture: .arm64
+            ),
+            capabilityEvaluator: MockCapabilityEvaluator(blockers: []),
+            actionExecutor: MockUpdateExecutor(),
+            cliProxyAPIInstalledVersionProvider: MockCLIProxyAPIInstalledVersionProvider(installedVersion: "v1.1.0"),
+            cliProxyAPIReleaseLoader: cliReleaseLoader,
+            cliProxyAPIActionExecutor: cliExecutor,
+            automaticCheckScheduler: MockAutomaticCheckScheduler(),
+            desktopSettingsProvider: {
+                var settings = CodexBarDesktopSettings()
+                settings.codexkitUpdate.automaticallyChecksForUpdates = false
+                settings.cliProxyAPIUpdate.automaticallyInstallsUpdates = true
+                return settings
+            }
+        )
+
+        await coordinator.checkCLIProxyAPIForUpdates(trigger: .automaticStartup)
+
+        XCTAssertEqual(cliReleaseLoader.loadCount, 1)
+        XCTAssertEqual(cliExecutor.executed.count, 1)
+        XCTAssertEqual(cliExecutor.executed.first?.release.version, "v1.2.0")
+        XCTAssertNil(coordinator.cliProxyAPIPendingAvailability)
+        guard case let .upToDate(installedVersion, checkedVersion) = coordinator.cliProxyAPIState else {
+            return XCTFail("Expected CLIProxyAPI upToDate state after automatic install")
+        }
+        XCTAssertEqual(installedVersion, "v1.2.0")
+        XCTAssertEqual(checkedVersion, "v1.2.0")
     }
 
     func testLocalCLIProxyAPIInstalledVersionProviderPrefersManifestVersionWithoutSourceTree() throws {
@@ -544,6 +615,39 @@ final class UpdateCoordinatorTests: CodexBarTestCase {
 
         guard case let .failed(message) = coordinator.cliProxyAPIState else {
             return XCTFail("Expected CLIProxyAPI failed state instead of a crash")
+        }
+        XCTAssertEqual(message, L.updateErrorNoCompatibleArtifact("Apple Silicon"))
+    }
+
+    func testCLIProxyAPIManualCheckFailsWithoutPendingWhenReleaseHasNoArtifact() async {
+        let cliExecutor = MockCLIProxyAPIUpdateExecutor()
+        let coordinator = UpdateCoordinator(
+            releaseLoader: MockReleaseLoader(release: self.makeRelease(version: "1.1.5")),
+            environment: MockUpdateEnvironment(
+                currentVersion: "1.1.5",
+                architecture: .arm64
+            ),
+            capabilityEvaluator: MockCapabilityEvaluator(blockers: []),
+            actionExecutor: MockUpdateExecutor(),
+            cliProxyAPIInstalledVersionProvider: MockCLIProxyAPIInstalledVersionProvider(installedVersion: "v1.1.0"),
+            cliProxyAPIReleaseLoader: MockCLIProxyAPIReleaseLoader(
+                release: CLIProxyAPIUpdateRelease(
+                    version: "v1.2.0",
+                    releasePageURL: URL(string: "https://example.com/cliproxyapi/releases/v1.2.0")!,
+                    artifact: nil
+                )
+            ),
+            cliProxyAPIActionExecutor: cliExecutor,
+            automaticCheckScheduler: MockAutomaticCheckScheduler(),
+            desktopSettingsProvider: { CodexBarDesktopSettings() }
+        )
+
+        await coordinator.checkCLIProxyAPIForUpdates(trigger: .manual)
+
+        XCTAssertNil(coordinator.cliProxyAPIPendingAvailability)
+        XCTAssertTrue(cliExecutor.executed.isEmpty)
+        guard case let .failed(message) = coordinator.cliProxyAPIState else {
+            return XCTFail("Expected CLIProxyAPI failed state for missing artifact")
         }
         XCTAssertEqual(message, L.updateErrorNoCompatibleArtifact("Apple Silicon"))
     }
@@ -1021,6 +1125,22 @@ final class UpdateCoordinatorTests: CodexBarTestCase {
             XCTFail(String(data: data, encoding: .utf8) ?? "tar failed")
         }
         return try Data(contentsOf: archiveURL)
+    }
+
+    private func makeCLIProxyAPIRelease(version: String) -> CLIProxyAPIUpdateRelease {
+        let bareVersion = version.hasPrefix("v") ? String(version.dropFirst()) : version
+        let artifactName = "CLIProxyAPI_\(bareVersion)_darwin_arm64.tar.gz"
+        return CLIProxyAPIUpdateRelease(
+            version: version,
+            releasePageURL: URL(string: "https://example.com/cliproxyapi/releases/\(version)")!,
+            artifact: CLIProxyAPIReleaseArtifact(
+                name: artifactName,
+                downloadURL: URL(string: "https://example.com/\(artifactName)")!,
+                architecture: .arm64,
+                format: .tarGzip,
+                sha256: nil
+            )
+        )
     }
 }
 

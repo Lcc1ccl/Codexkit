@@ -73,6 +73,10 @@ struct CLIProxyAPIAccountUsageItem: Equatable, Identifiable {
     var weeklyRemainingPercent: Int?
     var successRequests: Int
     var failedRequests: Int
+    var inputTokens: Int = 0
+    var outputTokens: Int = 0
+    var reasoningTokens: Int = 0
+    var cachedTokens: Int = 0
     var totalTokens: Int
 }
 
@@ -276,6 +280,10 @@ enum CLIProxyAPIAccountGrouping {
                     weeklyRemainingPercent: self.minimumRemainingPercent(planItems.map(\.weeklyRemainingPercent)),
                     successRequests: planItems.reduce(0) { $0 + $1.successRequests },
                     failedRequests: planItems.reduce(0) { $0 + $1.failedRequests },
+                    inputTokens: planItems.reduce(0) { $0 + $1.inputTokens },
+                    outputTokens: planItems.reduce(0) { $0 + $1.outputTokens },
+                    reasoningTokens: planItems.reduce(0) { $0 + $1.reasoningTokens },
+                    cachedTokens: planItems.reduce(0) { $0 + $1.cachedTokens },
                     totalTokens: planItems.reduce(0) { $0 + $1.totalTokens }
                 )
             }.sorted {
@@ -343,6 +351,10 @@ struct CLIProxyAPIServiceState: Equatable {
     var totalRequests: Int?
     var failedRequests: Int?
     var totalTokens: Int?
+    var requestsByDay: [String: Int]
+    var requestsByHour: [String: Int]
+    var tokensByDay: [String: Int]
+    var tokensByHour: [String: Int]
     var quotaSnapshot: CLIProxyAPIQuotaSnapshot?
     var accountUsageItems: [CLIProxyAPIAccountUsageItem]
     var observedAuthFiles: [CLIProxyAPIObservedAuthFile]
@@ -358,6 +370,10 @@ struct CLIProxyAPIServiceState: Equatable {
         totalRequests: Int? = nil,
         failedRequests: Int? = nil,
         totalTokens: Int? = nil,
+        requestsByDay: [String: Int] = [:],
+        requestsByHour: [String: Int] = [:],
+        tokensByDay: [String: Int] = [:],
+        tokensByHour: [String: Int] = [:],
         quotaSnapshot: CLIProxyAPIQuotaSnapshot? = nil,
         accountUsageItems: [CLIProxyAPIAccountUsageItem] = [],
         observedAuthFiles: [CLIProxyAPIObservedAuthFile] = []
@@ -372,6 +388,10 @@ struct CLIProxyAPIServiceState: Equatable {
         self.totalRequests = totalRequests
         self.failedRequests = failedRequests
         self.totalTokens = totalTokens
+        self.requestsByDay = requestsByDay
+        self.requestsByHour = requestsByHour
+        self.tokensByDay = tokensByDay
+        self.tokensByHour = tokensByHour
         self.quotaSnapshot = quotaSnapshot
         self.accountUsageItems = accountUsageItems
         self.observedAuthFiles = observedAuthFiles

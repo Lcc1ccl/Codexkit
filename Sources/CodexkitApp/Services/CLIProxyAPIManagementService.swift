@@ -109,19 +109,33 @@ struct CLIProxyAPIManagementModelsResponse: Decodable, Equatable {
 
 struct CLIProxyAPIManagementUsageResponse: Decodable, Equatable {
     struct TokenStats: Decodable, Equatable {
+        var inputTokens: Int?
+        var outputTokens: Int?
+        var reasoningTokens: Int?
+        var cachedTokens: Int?
         var totalTokens: Int?
 
         enum CodingKeys: String, CodingKey {
+            case inputTokens = "input_tokens"
+            case outputTokens = "output_tokens"
+            case reasoningTokens = "reasoning_tokens"
+            case cachedTokens = "cached_tokens"
             case totalTokens = "total_tokens"
         }
     }
 
     struct RequestDetail: Decodable, Equatable {
+        var timestamp: Date?
+        var latencyMs: Int?
+        var source: String?
         var authIndex: String?
         var failed: Bool?
         var tokens: TokenStats?
 
         enum CodingKeys: String, CodingKey {
+            case timestamp
+            case latencyMs = "latency_ms"
+            case source
             case authIndex = "auth_index"
             case failed
             case tokens
@@ -146,6 +160,10 @@ struct CLIProxyAPIManagementUsageResponse: Decodable, Equatable {
         var failure_count: Int?
         var total_tokens: Int?
         var apis: [String: APISnapshot]?
+        var requests_by_day: [String: Int]?
+        var requests_by_hour: [String: Int]?
+        var tokens_by_day: [String: Int]?
+        var tokens_by_hour: [String: Int]?
     }
 
     var usage: UsageSnapshot
@@ -366,7 +384,9 @@ final class CLIProxyAPIManagementService {
     func getUsageStatistics(config: CLIProxyAPIServiceConfig) async throws -> CLIProxyAPIManagementUsageResponse {
         let url = config.baseURL.appendingPathComponent("v0/management/usage")
         let data = try await self.performGET(url: url, secret: config.managementSecretKey)
-        return try JSONDecoder().decode(CLIProxyAPIManagementUsageResponse.self, from: data)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(CLIProxyAPIManagementUsageResponse.self, from: data)
     }
 
     func getLogs(
@@ -437,20 +457,32 @@ final class CLIProxyAPIManagementService {
         usage: CLIProxyAPIManagementUsageResponse?,
         localAccounts: [TokenAccount]
     ) -> [CLIProxyAPIAccountUsageItem] {
-        var statsByAuthIndex: [String: (success: Int, failed: Int, tokens: Int)] = [:]
+        var statsByAuthIndex: [String: (
+            success: Int,
+            failed: Int,
+            inputTokens: Int,
+            outputTokens: Int,
+            reasoningTokens: Int,
+            cachedTokens: Int,
+            totalTokens: Int
+        )] = [:]
 
         if let usage {
             for apiSnapshot in usage.usage.apis?.values ?? [:].values {
                 for modelSnapshot in apiSnapshot.models?.values ?? [:].values {
                     for detail in modelSnapshot.details ?? [] {
                         guard let authIndex = detail.authIndex, authIndex.isEmpty == false else { continue }
-                        var aggregate = statsByAuthIndex[authIndex] ?? (0, 0, 0)
+                        var aggregate = statsByAuthIndex[authIndex] ?? (0, 0, 0, 0, 0, 0, 0)
                         if detail.failed == true {
                             aggregate.failed += 1
                         } else {
                             aggregate.success += 1
                         }
-                        aggregate.tokens += detail.tokens?.totalTokens ?? 0
+                        aggregate.inputTokens += detail.tokens?.inputTokens ?? 0
+                        aggregate.outputTokens += detail.tokens?.outputTokens ?? 0
+                        aggregate.reasoningTokens += detail.tokens?.reasoningTokens ?? 0
+                        aggregate.cachedTokens += detail.tokens?.cachedTokens ?? 0
+                        aggregate.totalTokens += detail.tokens?.totalTokens ?? 0
                         statsByAuthIndex[authIndex] = aggregate
                     }
                 }
@@ -460,7 +492,7 @@ final class CLIProxyAPIManagementService {
         return files.map { file in
             let matchedAccount = self.matchLocalAccount(for: file, localAccounts: localAccounts)
 
-            let stats = file.authIndex.flatMap { statsByAuthIndex[$0] } ?? (0, 0, 0)
+            let stats = file.authIndex.flatMap { statsByAuthIndex[$0] } ?? (0, 0, 0, 0, 0, 0, 0)
             let email = matchedAccount?.email ?? file.email ?? file.account ?? file.name
             let planType = self.normalizedPlanType(file.idToken?.planType)
                 ?? matchedAccount?.planType
@@ -475,7 +507,11 @@ final class CLIProxyAPIManagementService {
                 weeklyRemainingPercent: matchedAccount.map { max(0, Int(round(100 - $0.secondaryUsedPercent))) },
                 successRequests: stats.success,
                 failedRequests: stats.failed,
-                totalTokens: stats.tokens
+                inputTokens: stats.inputTokens,
+                outputTokens: stats.outputTokens,
+                reasoningTokens: stats.reasoningTokens,
+                cachedTokens: stats.cachedTokens,
+                totalTokens: stats.totalTokens
             )
         }
         .sorted {

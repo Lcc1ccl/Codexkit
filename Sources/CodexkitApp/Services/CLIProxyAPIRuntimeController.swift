@@ -352,6 +352,10 @@ final class CLIProxyAPIRuntimeController: LifecycleControlling {
                 totalRequests: usage?.usage.total_requests ?? state.totalRequests,
                 failedRequests: usage?.failed_requests ?? usage?.usage.failure_count ?? state.failedRequests,
                 totalTokens: usage?.usage.total_tokens ?? state.totalTokens,
+                requestsByDay: usage?.usage.requests_by_day ?? state.requestsByDay,
+                requestsByHour: usage?.usage.requests_by_hour ?? state.requestsByHour,
+                tokensByDay: usage?.usage.tokens_by_day ?? state.tokensByDay,
+                tokensByHour: usage?.usage.tokens_by_hour ?? state.tokensByHour,
                 config: runtimeConfig,
                 quotaSnapshot: quotaSnapshot,
                 accountUsageItems: accountUsageItems,
@@ -368,6 +372,10 @@ final class CLIProxyAPIRuntimeController: LifecycleControlling {
                 totalRequests: state.totalRequests,
                 failedRequests: state.failedRequests,
                 totalTokens: state.totalTokens,
+                requestsByDay: state.requestsByDay,
+                requestsByHour: state.requestsByHour,
+                tokensByDay: state.tokensByDay,
+                tokensByHour: state.tokensByHour,
                 quotaSnapshot: state.quotaSnapshot,
                 accountUsageItems: state.accountUsageItems,
                 observedAuthFiles: state.observedAuthFiles
@@ -465,6 +473,10 @@ final class CLIProxyAPIRuntimeController: LifecycleControlling {
                         totalRequests: usage?.usage.total_requests ?? TokenStore.shared.cliProxyAPIState.totalRequests,
                         failedRequests: usage?.failed_requests ?? usage?.usage.failure_count ?? TokenStore.shared.cliProxyAPIState.failedRequests,
                         totalTokens: usage?.usage.total_tokens ?? TokenStore.shared.cliProxyAPIState.totalTokens,
+                        requestsByDay: usage?.usage.requests_by_day ?? TokenStore.shared.cliProxyAPIState.requestsByDay,
+                        requestsByHour: usage?.usage.requests_by_hour ?? TokenStore.shared.cliProxyAPIState.requestsByHour,
+                        tokensByDay: usage?.usage.tokens_by_day ?? TokenStore.shared.cliProxyAPIState.tokensByDay,
+                        tokensByHour: usage?.usage.tokens_by_hour ?? TokenStore.shared.cliProxyAPIState.tokensByHour,
                         config: runtimeConfig,
                         quotaSnapshot: quotaSnapshot,
                         accountUsageItems: accountUsageItems,
@@ -481,6 +493,10 @@ final class CLIProxyAPIRuntimeController: LifecycleControlling {
                         totalRequests: TokenStore.shared.cliProxyAPIState.totalRequests,
                         failedRequests: TokenStore.shared.cliProxyAPIState.failedRequests,
                         totalTokens: TokenStore.shared.cliProxyAPIState.totalTokens,
+                        requestsByDay: TokenStore.shared.cliProxyAPIState.requestsByDay,
+                        requestsByHour: TokenStore.shared.cliProxyAPIState.requestsByHour,
+                        tokensByDay: TokenStore.shared.cliProxyAPIState.tokensByDay,
+                        tokensByHour: TokenStore.shared.cliProxyAPIState.tokensByHour,
                         quotaSnapshot: TokenStore.shared.cliProxyAPIState.quotaSnapshot,
                         accountUsageItems: TokenStore.shared.cliProxyAPIState.accountUsageItems,
                         observedAuthFiles: TokenStore.shared.cliProxyAPIState.observedAuthFiles
@@ -509,6 +525,10 @@ final class CLIProxyAPIRuntimeController: LifecycleControlling {
         totalRequests: Int? = nil,
         failedRequests: Int? = nil,
         totalTokens: Int? = nil,
+        requestsByDay: [String: Int]? = nil,
+        requestsByHour: [String: Int]? = nil,
+        tokensByDay: [String: Int]? = nil,
+        tokensByHour: [String: Int]? = nil,
         config: CLIProxyAPIServiceConfig? = nil,
         quotaSnapshot: CLIProxyAPIQuotaSnapshot? = nil,
         accountUsageItems: [CLIProxyAPIAccountUsageItem]? = nil,
@@ -527,6 +547,10 @@ final class CLIProxyAPIRuntimeController: LifecycleControlling {
                 totalRequests: totalRequests ?? current.totalRequests,
                 failedRequests: failedRequests ?? current.failedRequests,
                 totalTokens: totalTokens ?? current.totalTokens,
+                requestsByDay: requestsByDay ?? current.requestsByDay,
+                requestsByHour: requestsByHour ?? current.requestsByHour,
+                tokensByDay: tokensByDay ?? current.tokensByDay,
+                tokensByHour: tokensByHour ?? current.tokensByHour,
                 quotaSnapshot: quotaSnapshot ?? current.quotaSnapshot,
                 accountUsageItems: accountUsageItems ?? current.accountUsageItems,
                 observedAuthFiles: observedAuthFiles ?? current.observedAuthFiles
@@ -637,4 +661,3 @@ extension CLIProxyAPIRuntimeControlling {
         false
     }
 }
-

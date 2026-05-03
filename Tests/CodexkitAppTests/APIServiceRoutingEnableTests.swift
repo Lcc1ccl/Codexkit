@@ -103,6 +103,102 @@ final class APIServiceRoutingEnableTests: CodexBarTestCase {
         XCTAssertEqual(syncService.restoreCallCount, 0)
     }
 
+    func testEnableRoutingProbesEffectiveRuntimeConfigAfterApply() async throws {
+        let oauthAccount = try self.makeOAuthAccount(
+            accountID: "acct-probe-effective-runtime",
+            email: "probe-effective-runtime@example.com"
+        )
+        let storedOAuthAccount = CodexBarProviderAccount.fromTokenAccount(
+            oauthAccount,
+            existingID: oauthAccount.accountId
+        )
+        try self.writeConfig(self.makeRoutingConfig(storedOAuthAccount))
+
+        let syncService = RoutingProbeSyncService()
+        let runtimeController = RuntimeControllerSpy()
+        let effectiveConfig = CLIProxyAPIServiceConfig(
+            host: "127.0.0.1",
+            port: 51356,
+            authDirectory: CLIProxyAPIService.authDirectoryURL,
+            managementSecretKey: "runtime-secret",
+            clientAPIKey: "runtime-client-key",
+            enabled: true
+        )
+        var store: TokenStore!
+        var probedConfig: CLIProxyAPIServiceConfig?
+        store = TokenStore(
+            configStore: CodexBarConfigStore(),
+            syncService: syncService,
+            openRouterGatewayService: OpenRouterGatewayControllerSpy(),
+            apiServiceRuntimeController: { runtimeController },
+            apiServiceRoutingProbeAction: { config in
+                probedConfig = config
+            },
+            codexRunningProcessIDs: { [] }
+        )
+        runtimeController.onApplyConfiguration = {
+            store.updateCLIProxyAPIState(
+                CLIProxyAPIServiceState(
+                    config: effectiveConfig,
+                    status: .running
+                )
+            )
+        }
+
+        _ = try await store.enableAPIServiceRoutingFromMenu()
+
+        XCTAssertEqual(probedConfig?.host, effectiveConfig.host)
+        XCTAssertEqual(probedConfig?.port, effectiveConfig.port)
+        XCTAssertEqual(probedConfig?.managementSecretKey, effectiveConfig.managementSecretKey)
+        XCTAssertEqual(probedConfig?.clientAPIKey, effectiveConfig.clientAPIKey)
+        XCTAssertEqual(runtimeController.appliedSettings.count, 1)
+        XCTAssertEqual(syncService.restoreCallCount, 0)
+    }
+
+    func testEnableRoutingFallsBackToSynchronizedConfigWhenRuntimeStateInactive() async throws {
+        let oauthAccount = try self.makeOAuthAccount(
+            accountID: "acct-probe-fallback-runtime",
+            email: "probe-fallback-runtime@example.com"
+        )
+        let storedOAuthAccount = CodexBarProviderAccount.fromTokenAccount(
+            oauthAccount,
+            existingID: oauthAccount.accountId
+        )
+        try self.writeConfig(self.makeRoutingConfig(storedOAuthAccount))
+
+        let syncService = RoutingProbeSyncService()
+        let runtimeController = RuntimeControllerSpy()
+        var probedConfig: CLIProxyAPIServiceConfig?
+        let store = TokenStore(
+            configStore: CodexBarConfigStore(),
+            syncService: syncService,
+            openRouterGatewayService: OpenRouterGatewayControllerSpy(),
+            apiServiceRuntimeController: { runtimeController },
+            apiServiceRoutingProbeAction: { config in
+                probedConfig = config
+            },
+            codexRunningProcessIDs: { [] }
+        )
+
+        _ = try await store.enableAPIServiceRoutingFromMenu()
+
+        XCTAssertEqual(probedConfig?.host, "127.0.0.1")
+        XCTAssertEqual(probedConfig?.port, 8317)
+        XCTAssertEqual(probedConfig?.managementSecretKey, "secret")
+        XCTAssertEqual(probedConfig?.clientAPIKey, "client-key")
+        XCTAssertEqual(runtimeController.appliedSettings.count, 1)
+        XCTAssertEqual(syncService.restoreCallCount, 0)
+    }
+
+    func testRoutingProbeRetriesCannotConnectToHostButNotAuthenticationFailures() {
+        XCTAssertTrue(
+            TokenStore.shouldRetryAPIServiceRoutingProbe(urlError: URLError(.cannotConnectToHost))
+        )
+        XCTAssertFalse(
+            TokenStore.shouldRetryAPIServiceRoutingProbe(urlError: URLError(.userAuthenticationRequired))
+        )
+    }
+
     func testEnableRoutingProbeFailureRollsBackAndDisablesRouting() async throws {
         let originalLanguageOverride = L.languageOverride
         L.languageOverride = false
@@ -425,10 +521,12 @@ private final class RuntimeControllerSpy: CLIProxyAPIRuntimeControlling {
     var nextAdoptResult = false
     var appliedSettings: [CodexBarDesktopSettings.CLIProxyAPISettings] = []
     var adoptRequests: [CodexBarDesktopSettings.CLIProxyAPISettings] = []
+    var onApplyConfiguration: (() -> Void)?
 
     @discardableResult
     func applyConfiguration(_ settings: CodexBarDesktopSettings.CLIProxyAPISettings) -> Bool {
         self.appliedSettings.append(settings)
+        self.onApplyConfiguration?()
         return self.nextApplyResult
     }
 

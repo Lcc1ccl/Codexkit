@@ -3,7 +3,7 @@ import XCTest
 @testable import CodexkitApp
 
 @MainActor
-final class CLIProxyAPIRuntimeControllerTests: XCTestCase {
+final class CLIProxyAPIRuntimeControllerTests: CodexBarTestCase {
     override func setUp() {
         super.setUp()
         MockURLProtocol.handler = nil
@@ -288,6 +288,82 @@ final class CLIProxyAPIRuntimeControllerTests: XCTestCase {
 
         XCTAssertFalse(reused)
         XCTAssertEqual(requestedPaths, ["/healthz", "/v0/management/config"])
+    }
+
+    func testRefreshHealthPropagatesUsageTimeBuckets() async {
+        let originalState = TokenStore.shared.cliProxyAPIState
+        defer {
+            TokenStore.shared.updateCLIProxyAPIState(originalState)
+        }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let controller = CLIProxyAPIRuntimeController(
+            service: CLIProxyAPIService(session: session),
+            managementService: CLIProxyAPIManagementService(session: session)
+        )
+        let config = CLIProxyAPIServiceConfig(
+            host: "127.0.0.1",
+            port: 8413,
+            authDirectory: URL(fileURLWithPath: "/tmp/auth"),
+            managementSecretKey: "secret",
+            enabled: true
+        )
+        TokenStore.shared.updateCLIProxyAPIState(
+            CLIProxyAPIServiceState(
+                config: config,
+                status: .degraded,
+                totalRequests: 1,
+                failedRequests: 0,
+                totalTokens: 2,
+                requestsByDay: ["previous-day": 1],
+                requestsByHour: ["previous-hour": 1],
+                tokensByDay: ["previous-day": 2],
+                tokensByHour: ["previous-hour": 2]
+            )
+        )
+
+        MockURLProtocol.handler = { request in
+            switch request.url?.path {
+            case "/healthz":
+                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(#"{"status":"ok"}"#.utf8))
+            case "/v0/management/config":
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
+                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(#"{"host":"127.0.0.1","port":8413}"#.utf8))
+            case "/v0/management/auth-files":
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
+                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(#"{"files":[]}"#.utf8))
+            case "/v0/management/usage":
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
+                let body = """
+                {"usage":{"total_requests":12,"failure_count":3,"total_tokens":144,"requests_by_day":{"2026-05-02":12},"requests_by_hour":{"2026-05-02T19":7},"tokens_by_day":{"2026-05-02":144},"tokens_by_hour":{"2026-05-02T19":90},"apis":{}},"failed_requests":3}
+                """.data(using: .utf8)!
+                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, body)
+            case "/v0/management/quota":
+                let response = HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil, headerFields: nil)!
+                return (response, Data(#"{"error":"quota unavailable"}"#.utf8))
+            default:
+                XCTFail("Unexpected request: \(request.url?.absoluteString ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+
+        await controller.refreshHealth()
+
+        let state = TokenStore.shared.cliProxyAPIState
+        XCTAssertEqual(state.status, .running)
+        XCTAssertEqual(state.totalRequests, 12)
+        XCTAssertEqual(state.failedRequests, 3)
+        XCTAssertEqual(state.totalTokens, 144)
+        XCTAssertEqual(state.requestsByDay, ["2026-05-02": 12])
+        XCTAssertEqual(state.requestsByHour, ["2026-05-02T19": 7])
+        XCTAssertEqual(state.tokensByDay, ["2026-05-02": 144])
+        XCTAssertEqual(state.tokensByHour, ["2026-05-02T19": 90])
     }
 
     func testRuntimeStateDisablesStartWhileProcessIsAlreadyLive() {

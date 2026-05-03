@@ -1264,7 +1264,7 @@ final class UpdateCoordinator: ObservableObject {
         do {
             let installedVersion = self.cliProxyAPIInstalledVersionProvider.resolveInstalledVersion()
             let release = try await self.cliProxyAPIReleaseLoader.loadLatestRelease()
-            if let availability = self.resolveCLIProxyAPIAvailability(
+            if let availability = try self.resolveCLIProxyAPIAvailability(
                 installedVersion: installedVersion,
                 release: release
             ) {
@@ -1282,6 +1282,7 @@ final class UpdateCoordinator: ObservableObject {
                 )
             }
         } catch {
+            self.cliProxyAPIPendingAvailability = nil
             self.cliProxyAPIState = .failed(error.localizedDescription)
         }
     }
@@ -1351,7 +1352,7 @@ final class UpdateCoordinator: ObservableObject {
     private func resolveCLIProxyAPIAvailability(
         installedVersion: String,
         release: CLIProxyAPIUpdateRelease
-    ) -> CLIProxyAPIUpdateAvailability? {
+    ) throws -> CLIProxyAPIUpdateAvailability? {
         if let installedSemanticVersion = AppSemanticVersion(installedVersion),
            let releaseSemanticVersion = AppSemanticVersion(release.version) {
             guard installedSemanticVersion < releaseSemanticVersion else {
@@ -1359,6 +1360,10 @@ final class UpdateCoordinator: ObservableObject {
             }
         } else if installedVersion == release.version {
             return nil
+        }
+
+        guard release.artifact != nil else {
+            throw AppUpdateError.noCompatibleArtifact(self.environment.architecture)
         }
 
         return CLIProxyAPIUpdateAvailability(
@@ -1385,8 +1390,11 @@ final class UpdateCoordinator: ObservableObject {
 
         do {
             try await self.cliProxyAPIActionExecutor.execute(availability)
-            self.cliProxyAPIPendingAvailability = availability
-            self.cliProxyAPIState = .updateAvailable(availability)
+            self.cliProxyAPIPendingAvailability = nil
+            self.cliProxyAPIState = .upToDate(
+                installedVersion: availability.release.version,
+                checkedVersion: availability.release.version
+            )
         } catch {
             self.cliProxyAPIState = .failed(error.localizedDescription)
         }
